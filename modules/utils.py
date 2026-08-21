@@ -169,6 +169,17 @@ def export_colored_las(las_input_path: str,
         green = np.full(num_points, gray_val, dtype=np.uint16)
         blue = np.full(num_points, gray_val, dtype=np.uint16)
     
+    # 1.5 地面(灰色)与植被(绿色)分类着色：覆盖背景默认色，形成清晰分类可视化
+    GROUND_GRAY = int(0.49 * 65535)   # 约 32112 灰
+    VEG_GREEN = int(0.69 * 65535)     # 约 45219 绿
+    red[ground_idx] = GROUND_GRAY
+    green[ground_idx] = GROUND_GRAY
+    blue[ground_idx] = GROUND_GRAY
+    veg_idx = np.where(classifications == int(ClassificationCode.LOW_VEGETATION))[0]
+    red[veg_idx] = 0
+    green[veg_idx] = VEG_GREEN
+    blue[veg_idx] = 0
+
     # 2. 导线与跳线染色 (严格剔除所有草绿/黄绿/深绿等植被色系，采用高反差醒目分相色调)
     WIRE_PRESET_COLORS = [
         (65535, 12000, 0),      # 01. 鲜橙红 (Vivid Orange Red)

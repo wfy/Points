@@ -106,15 +106,15 @@ def cluster_wire_candidates(points: np.ndarray,
             catenary=cat_model
         )
         
-        if diag_span > 30.0 and linearity > 0.8:
+        if diag_span > 30.0 and linearity > 0.8 and min_var < 1.0:
             sure_wire_clusters.append(cluster_info)
         elif diag_span > 15.0 and linearity > 0.75 and min_var < 1.5:
             sure_wire_clusters.append(cluster_info)
         elif diag_span > 8.0 and linearity > 0.85 and min_var < 1.0:
             sure_wire_clusters.append(cluster_info)
-        elif cat_model is not None and cat_model.residual_rmse < 0.35 and diag_span > 10.0:
+        elif cat_model is not None and cat_model.residual_rmse < 0.35 and diag_span > 10.0 and min_var < 1.5:
             sure_wire_clusters.append(cluster_info)
-        elif diag_span > 3.0 and linearity > 0.6 and min_var < 3.0:
+        elif diag_span > 3.0 and linearity > 0.6 and min_var < 1.5:
             candidate_clusters.append(cluster_info)
             
     validated_cands = []
@@ -197,7 +197,7 @@ def filter_canopy_by_probes(final_cable_pts: np.ndarray,
         proj = np.dot(c_pts - cluster.center, cluster.dir)
         p_min, p_max = np.min(proj), np.max(proj)
         span_len = p_max - p_min
-        if span_len < 3.0 or span_len > 30.0:
+        if span_len < 3.0 or span_len > 45.0:
             continue
             
         sample_fractions = np.linspace(0.1, 0.9, 9)

@@ -164,6 +164,7 @@ def detect_towers(off_ground_pts: np.ndarray,
     """
     阶段二：3D 体素垂直连续性 + 2D 连通域聚类锁定铁塔与自适应横担拟合
     """
+    np.random.seed(42)  # fixed RANSAC seed for reproducibility
     if config is None:
         config = DEFAULT_CONFIG
         
