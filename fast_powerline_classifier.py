@@ -43,7 +43,7 @@ def fast_classify_and_color_powerline(las_input_path: str,
     
     # 0. 读取 LAS 点云文件
     las = laspy.read(las_input_path)
-    points = np.vstack((las.x, las.y, las.z)).T
+    points = np.column_stack([np.array(las.x), np.array(las.y), np.array(las.z)])
     num_points = len(points)
     print(f"   读取点云总数: {num_points:,} 点")
     
@@ -58,7 +58,7 @@ def fast_classify_and_color_powerline(las_input_path: str,
         idw_k=config.ground.idw_k,
         batch_size=config.ground.idw_batch_size
     )
-    print(f"   阶段一完成 (耗时: {time.time() - t1:.2f}s) | 剥离地面点: {len(ground_idx):,} 点")
+    import gc
     
     # 2. 阶段二：3D 体素垂直连续性 + 2D 连通域聚类锁定铁塔 (Tower Detection & Filtering)
     t2 = time.time()
@@ -71,41 +71,64 @@ def fast_classify_and_color_powerline(las_input_path: str,
         config=config
     )
     print(f"   阶段二完成 (耗时: {time.time() - t2:.2f}s) | 检测到候选铁塔: {len(tower_infos)} 座")
-    
-    # 3. 阶段三：PCA 特征姿态分析 + 连续 3D 悬链线物理轨道追踪缝合 (整跨单相单色导线)
-    t3 = time.time()
-    print("-> 3/4 执行 PCA 特征姿态分析与 3D 悬链线完整连续追踪...")
-    ext_res = extract_and_track_powerlines(
-        points=points,
-        off_ground_pts=off_ground_pts,
-        off_ground_idx=off_ground_idx,
-        rel_z=rel_z,
-        is_tower=is_tower,
-        is_near_tower_high_arm=is_near_tower_high_arm,
-        tower_infos=tower_infos,
-        config=config
-    )
-    cable_pts_idx = ext_res.cable_pts_idx
-    point_line_id = ext_res.point_line_id
-    all_confirmed = ext_res.all_confirmed
-    suspect_line_ids = ext_res.suspect_line_ids
-    find_line_func = ext_res.find_line_func
-    
-    print(f"   阶段三完成 (耗时: {time.time() - t3:.2f}s) | 提取导线点: {len(cable_pts_idx):,} 点 | 聚合线路簇: {len(all_confirmed)} 组")
 
-    # 4. 阶段四：导线依附拓扑校验
-    t4 = time.time()
-    print("-> 4/4 执行导线依附拓扑校验...")
-    tower_pts_idx, valid_tower_count, demoted_pts_idx = validate_tower_topology(
-        points=points,
-        off_ground_idx=off_ground_idx,
-        rel_z=rel_z,
-        tower_infos=tower_infos,
-        cable_pts_idx=cable_pts_idx,
-        config=config
-    )
-    print(f"   阶段四完成 (耗时: {time.time() - t4:.2f}s) | 拓扑通过铁塔: {valid_tower_count} 座 (剥离降级 {len(demoted_pts_idx):,} 点)")
+    # 阶段二着色参考：收集已检测铁塔中“最下方横担以下”的点（仅用于后段标黄，不改检测/分类）
+    tower_below_arm_pts_idx = np.array([], dtype=int)
+    if len(tower_infos) > 0:
+        _parts = []
+        for _info in tower_infos:
+            _local = _info.get('pts_idx', np.array([], dtype=int))
+            if len(_local) == 0:
+                continue
+            _z_low = float(_info.get('z_lowest_arm', 10.0))
+            _below = _local[rel_z[_local] < _z_low]
+            if len(_below) > 0:
+                _parts.append(off_ground_idx[_below])
+        if _parts:
+            tower_below_arm_pts_idx = np.unique(np.concatenate(_parts))
+
+    # 3. 阶段三：PCA 特征姿态分析 + 连续 3D 悬链线物理轨道追踪缝合 (【按需临时注释导线识别】)
+    # t3 = time.time()
+    # print("-> 3/4 执行 PCA 特征姿态分析与 3D 悬链线完整连续追踪...")
+    # ext_res = extract_and_track_powerlines(
+    #     points=points,
+    #     off_ground_pts=off_ground_pts,
+    #     off_ground_idx=off_ground_idx,
+    #     rel_z=rel_z,
+    #     is_tower=is_tower,
+    #     is_near_tower_high_arm=is_near_tower_high_arm,
+    #     tower_infos=tower_infos,
+    #     config=config
+    # )
+    # cable_pts_idx = ext_res.cable_pts_idx
+    # point_line_id = ext_res.point_line_id
+    # all_confirmed = ext_res.all_confirmed
+    # suspect_line_ids = ext_res.suspect_line_ids
+    # find_line_func = ext_res.find_line_func
+    cable_pts_idx = np.array([], dtype=int)
+    point_line_id = np.zeros(num_points, dtype=int)
+    all_confirmed = []
+    suspect_line_ids = set()
+    find_line_func = lambda x: x
+    print("-> 3/4 [已注释导线识别阶段]")
+
+    # 4. 阶段四：导线依附拓扑校验 (导线识别注释时，直接保留检测到的杆塔点)
+    # tower_pts_idx, valid_tower_count, demoted_pts_idx = validate_tower_topology(
+    #     points=points,
+    #     off_ground_idx=off_ground_idx,
+    #     rel_z=rel_z,
+    #     tower_infos=tower_infos,
+    #     cable_pts_idx=cable_pts_idx,
+    #     config=config
+    # )
+    tower_pts_idx = off_ground_idx[is_tower] if np.any(is_tower) else np.array([], dtype=int)
+    valid_tower_count = len(tower_infos)
+    print(f"-> 4/4 杆塔检测确认: 检测到 {valid_tower_count} 座杆塔 (杆塔点数: {len(tower_pts_idx):,})")
     tower_arm_pts_idx = off_ground_idx[is_tower_arm & is_tower] if np.any(is_tower_arm & is_tower) else np.array([], dtype=int)
+
+    # 仅对拓扑校验通过的铁塔点标黄：最下方横担以下区域（不改分类）
+    if len(tower_below_arm_pts_idx) > 0:
+        tower_below_arm_pts_idx = np.intersect1d(tower_below_arm_pts_idx, tower_pts_idx)
 
     # 5. 组装色彩与分类属性，导出成果 LAS 文件
     actual_out_path = export_colored_las(
@@ -120,7 +143,8 @@ def fast_classify_and_color_powerline(las_input_path: str,
         point_line_id=point_line_id,
         suspect_line_ids=suspect_line_ids,
         find_line_func=find_line_func,
-        force_kill_viewer=config.export.force_kill_viewer
+        force_kill_viewer=config.export.force_kill_viewer,
+        tower_below_arm_pts_idx=tower_below_arm_pts_idx
     )
     
     veg_count = num_points - len(ground_idx) - len(tower_pts_idx) - len(cable_pts_idx)

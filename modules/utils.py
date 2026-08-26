@@ -19,12 +19,10 @@ def close_qtmodeler():
 
 def open_in_qtmodeler(las_path: str):
     """
-    自动将分类好的 LAS 点云导入 QTModeler.exe
-    打开前若检测到或存在已运行的 QTModeler 进程，先强行关闭后再启动全新实例
+    自动将分类好的 LAS 点云导入 QTModeler.exe 打开展示
     """
-    print("-> 正在检查并重启 QTModeler.exe 加载最新成果...")
-    close_qtmodeler()
-    
+    abs_las = os.path.abspath(las_path)
+
     qt_path = None
     possible_paths = [
         r"C:\Program Files\QTModeler_820_UX_TRIAL\QTModeler.exe",
@@ -43,14 +41,13 @@ def open_in_qtmodeler(las_path: str):
 
     if qt_path and os.path.exists(qt_path):
         try:
-            abs_las = os.path.abspath(las_path)
             subprocess.Popen([qt_path, abs_las])
-            print(f"[Done] 成功重启 QTModeler 并加载 '{os.path.basename(abs_las)}'！")
+            print(f"[Done] 成功启动 QTModeler 并加载 '{os.path.basename(abs_las)}'！")
         except Exception as e:
             print(f"推送到 QTModeler 失败: {e}")
     else:
         try:
-            os.startfile(os.path.abspath(las_path))
+            os.startfile(abs_las)
             print("[Done] 已通过 Windows 默认查看器打开成果文件。")
         except Exception as e:
             print(f"无法自动打开文件: {e}")
@@ -107,7 +104,8 @@ def export_colored_las(las_input_path: str,
                        suspect_line_ids: set,
                        find_line_func,
                        insulator_pts_idx: np.ndarray = None,
-                       force_kill_viewer: bool = False) -> str:
+                       force_kill_viewer: bool = False,
+                       tower_below_arm_pts_idx: np.ndarray = None) -> str:
     """
     组装色彩与分类属性，写回带 RGB 的成果 LAS 文件 (Point Format 3)
     支持 Class 2(地面), Class 3(植被), Class 14(导线/跳线), Class 15(杆塔), Class 16(耐张绝缘子串)
@@ -180,24 +178,24 @@ def export_colored_las(las_input_path: str,
     green[veg_idx] = VEG_GREEN
     blue[veg_idx] = 0
 
-    # 2. 导线与跳线染色 (严格剔除所有草绿/黄绿/深绿等植被色系，采用高反差醒目分相色调)
+    # 2. 导线与跳线染色 (严格剔除杆塔蓝/黄、植被绿、地面灰等色系，采用高反差独立分相色调)
     WIRE_PRESET_COLORS = [
-        (65535, 12000, 0),      # 01. 鲜橙红 (Vivid Orange Red)
-        (65535, 48000, 0),      # 02. 亮金黄 (Bright Gold Yellow)
-        (0, 48000, 65535),      # 03. 电光青蓝 (Electric Cyan Blue)
-        (55000, 0, 65535),      # 04. 靓丽紫罗兰 (Vivid Violet)
-        (65535, 0, 45000),      # 05. 荧光洋红/粉红 (Hot Magenta Pink)
-        (65535, 30000, 0),      # 06. 琥珀橙 (Amber Orange)
-        (0, 65535, 65535),      # 07. 纯青色 (Pure Cyan)
-        (42000, 0, 65535),      # 08. 皇家紫 (Royal Purple)
-        (65535, 0, 25000),      # 09. 玫红 (Deep Rose)
-        (65535, 58000, 0),      # 10. 暖阳金 (Warm Gold)
-        (15000, 45000, 65535),  # 11. 冰蓝 (Ice Blue)
-        (60000, 10000, 60000),  # 12. 兰花紫 (Orchid Purple)
-        (65535, 22000, 10000),  # 13. 珊瑚红 (Coral Red)
-        (30000, 52000, 65535),  # 14. 蔚蓝 (Cerulean)
-        (65535, 0, 65535),      # 15. 品红 (Magenta)
-        (65535, 40000, 15000),  # 16. 蜜桃橙 (Peach Orange)
+        (65535, 15000, 0),      # 01. 烈焰橙红 (Flame Orange Red)
+        (65535, 0, 48000),      # 02. 荧光洋红 (Fluorescent Magenta)
+        (52000, 0, 65535),      # 03. 亮紫罗兰 (Bright Violet)
+        (65535, 30000, 0),      # 04. 鲜亮琥珀橙 (Vivid Amber Orange)
+        (65535, 0, 65535),      # 05. 璀璨品红 (Brilliant Magenta)
+        (42000, 0, 65535),      # 06. 皇家紫 (Royal Purple)
+        (65535, 0, 25000),      # 07. 深玫瑰红 (Deep Rose Red)
+        (65535, 22000, 8000),   # 08. 珊瑚赤橙 (Coral Orange)
+        (58000, 10000, 58000),  # 09. 兰花紫 (Orchid Purple)
+        (65535, 8000, 30000),   # 10. 霓虹粉红 (Neon Hot Pink)
+        (48000, 0, 55000),      # 11. 暮光紫 (Twilight Purple)
+        (65535, 35000, 0),      # 12. 暖炽橙 (Warm Blaze Orange)
+        (65535, 0, 38000),      # 13. 宝石红 (Ruby Pink)
+        (36000, 0, 65535),      # 14. 丁香深紫 (Lilac Deep Purple)
+        (65535, 18000, 18000),  # 15. 鲜桃红 (Peach Rose)
+        (54000, 0, 42000),      # 16. 紫红 (Red Violet)
     ]
     
     if len(cable_pts_idx) > 0 and len(all_confirmed) > 0:
@@ -209,12 +207,13 @@ def export_colored_las(las_input_path: str,
             elif line_i <= len(WIRE_PRESET_COLORS):
                 line_color_map[line_i] = WIRE_PRESET_COLORS[line_i - 1]
             else:
-                # 算法动态生成：严格避开绿色区间 (跳过 HSV 中 H in [0.14, 0.50])
+                # 算法动态生成：严格避开杆塔黄色/蓝色区间、植被绿色区间以及地面灰度
+                # 仅在 [0.0, 0.09] (红橙) 与 [0.70, 0.95] (紫/洋红/粉红) 之间生成
                 t = (line_i * 0.618033988749895) % 1.0
-                if t < 0.22:
-                    h = (t / 0.22) * 0.14               # 红色 -> 橙黄
+                if t < 0.25:
+                    h = (t / 0.25) * 0.09               # 红色 -> 橙色
                 else:
-                    h = 0.50 + ((t - 0.22) / 0.78) * 0.48  # 青蓝 -> 紫 -> 洋红 -> 绯红
+                    h = 0.70 + ((t - 0.25) / 0.75) * 0.25  # 紫 -> 洋红 -> 粉红 -> 玫瑰红
                 r, g, b = colorsys.hsv_to_rgb(h, 0.95, 1.0)
                 line_color_map[line_i] = (int(r * 65535), int(g * 65535), int(b * 65535))
             
@@ -228,11 +227,11 @@ def export_colored_las(las_input_path: str,
                 blue[pt_idx] = cb
             else:
                 red[pt_idx] = 65535
-                green[pt_idx] = 45000
+                green[pt_idx] = 20000
                 blue[pt_idx] = 0
     elif len(cable_pts_idx) > 0:
         red[cable_pts_idx] = 65535
-        green[cable_pts_idx] = 45000
+        green[cable_pts_idx] = 20000
         blue[cable_pts_idx] = 0
         
     # 3. 铁塔与横担染色 (纯正工业蓝)
@@ -245,32 +244,46 @@ def export_colored_las(las_input_path: str,
         red[tower_arm_pts_idx] = 0
         green[tower_arm_pts_idx] = 0
         blue[tower_arm_pts_idx] = 65535
-        
+
+    # 3b. 最下方横担以下区域标记为高亮黄色 (仅对已判定铁塔点重着色，不改分类)
+    if tower_below_arm_pts_idx is not None and len(tower_below_arm_pts_idx) > 0:
+        red[tower_below_arm_pts_idx] = 65535
+        green[tower_below_arm_pts_idx] = 65535
+        blue[tower_below_arm_pts_idx] = 0
+
     # 4. 耐张绝缘子串挂点染色 (高反差纯白 65535, 65535, 65535)
     if insulator_pts_idx is not None and len(insulator_pts_idx) > 0:
         red[insulator_pts_idx] = 65535
         green[insulator_pts_idx] = 65535
         blue[insulator_pts_idx] = 65535
 
-    new_header = laspy.LasHeader(point_format=3, version="1.2")
-    new_header.scales = las.header.scales
-    new_header.offsets = las.header.offsets
-    
-    new_las = laspy.LasData(new_header)
-    new_las.x, new_las.y, new_las.z = las.x, las.y, las.z
-    new_las.classification = classifications
-    
-    new_las.red = red
-    new_las.green = green
-    new_las.blue = blue
-    
     final_output_path = get_safe_output_path(las_output_path)
     if os.path.exists(final_output_path):
         try:
             os.remove(final_output_path)
         except OSError:
             pass
-            
-    new_las.write(final_output_path)
+
+    if hasattr(las, 'red') and hasattr(las, 'green') and hasattr(las, 'blue'):
+        las.classification = classifications
+        las.red = red
+        las.green = green
+        las.blue = blue
+        las.write(final_output_path)
+    else:
+        new_header = laspy.LasHeader(point_format=3, version="1.2")
+        new_header.scales = las.header.scales
+        new_header.offsets = las.header.offsets
+        new_las = laspy.LasData(new_header)
+        new_las.points = laspy.ScaleAwarePointRecord.zeros(len(las.x), header=new_header)
+        new_las.x = las.x
+        new_las.y = las.y
+        new_las.z = las.z
+        new_las.classification = classifications
+        new_las.red = red
+        new_las.green = green
+        new_las.blue = blue
+        new_las.write(final_output_path)
+
     print(f"   输出成果: '{final_output_path}'")
     return final_output_path

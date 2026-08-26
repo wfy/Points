@@ -46,37 +46,39 @@ def cluster_tower_voxels(off_ground_pts: np.ndarray,
     """
     tgx = (off_ground_pts[:, 0] / t_grid_size).astype(np.int32)
     tgy = (off_ground_pts[:, 1] / t_grid_size).astype(np.int32)
-    tgz = (rel_z / 2.0).astype(np.int32)
-    tgz = np.maximum(tgz, 0)
+    tgz = np.maximum((rel_z / 2.0).astype(np.int32), 0)
     
-    coords_3d = np.column_stack((tgx, tgy, tgz))
-    unique_voxels, inv_3d = np.unique(coords_3d, axis=0, return_inverse=True)
-    coords_2d = unique_voxels[:, :2]
-    unique_2d, inv_2d = np.unique(coords_2d, axis=0, return_inverse=True)
+    min_x, min_y = int(np.min(tgx)), int(np.min(tgy))
+    ny = int(np.max(tgy) - min_y + 1)
+    code_2d = (tgx - min_x).astype(np.int64) * ny + (tgy - min_y).astype(np.int64)
     
-    sort_idx = np.lexsort((unique_voxels[:, 2], inv_2d))
-    sorted_inv_2d = inv_2d[sort_idx]
-    sorted_z = unique_voxels[sort_idx, 2]
+    u_code, inv_2d = np.unique(code_2d, return_inverse=True)
+    u_tgx = (u_code // ny + min_x).astype(np.int32)
+    u_tgy = (u_code % ny + min_y).astype(np.int32)
+    unique_2d = np.column_stack((u_tgx, u_tgy))
     
-    _, start_indices = np.unique(sorted_inv_2d, return_index=True)
-    z_voxels_per_grid = np.split(sorted_z, start_indices[1:])
-    
-    grid_heights = [z[-1] for z in z_voxels_per_grid]
-    grid_counts = [len(z) for z in z_voxels_per_grid]
-    
-    pts_counts = np.bincount(inv_3d)
-    grid_pts_counts = np.bincount(inv_2d, weights=pts_counts).astype(np.int32)
-    
+    grid_pts_counts = np.bincount(inv_2d, minlength=len(u_code))
     min_h_layer = int(min_tower_rel_z / 2.0)
-    candidate_tower_indices = []
-    for i in range(len(unique_2d)):
-        h_idx = grid_heights[i]
-        c_idx = grid_counts[i]
-        pt_c = grid_pts_counts[i]
+    
+    valid_grid_idx = np.where(grid_pts_counts >= min_pts_count)[0]
+    if len(valid_grid_idx) == 0:
+        return []
         
-        # 杆塔初筛门槛：高度 >= min_tower_rel_z, 点数 >= min_pts_count, 垂直占空比 >= continuity_ratio
-        if h_idx >= min_h_layer and pt_c >= min_pts_count and (c_idx / (h_idx + 1)) >= continuity_ratio:
-            candidate_tower_indices.append(i)
+    candidate_tower_indices = []
+    mask_pts_in_valid = np.isin(inv_2d, valid_grid_idx)
+    sub_inv = inv_2d[mask_pts_in_valid]
+    sub_z = tgz[mask_pts_in_valid]
+    
+    grid_heights = {}
+    for g_i in valid_grid_idx:
+        gz_layers = sub_z[sub_inv == g_i]
+        if len(gz_layers) == 0:
+            continue
+        max_h = int(np.max(gz_layers))
+        num_layers = len(np.unique(gz_layers))
+        if max_h >= min_h_layer and (num_layers / (max_h + 1)) >= continuity_ratio:
+            candidate_tower_indices.append(g_i)
+            grid_heights[g_i] = max_h
             
     raw_tower_infos = []
     if len(candidate_tower_indices) > 0:
@@ -91,7 +93,7 @@ def cluster_tower_voxels(off_ground_pts: np.ndarray,
             return parent[i]
         def union(i, j):
             ri, rj = find(i), find(j)
-            if ri != rj: parent_ri = rj
+            if ri != rj: parent[ri] = rj
             
         for i, j in pairs:
             ri, rj = find(i), find(j)
@@ -108,14 +110,14 @@ def cluster_tower_voxels(off_ground_pts: np.ndarray,
                 max_z = 0.0
                 for m in members:
                     orig_idx = candidate_tower_indices[m]
-                    mz = grid_heights[orig_idx] * 2.0
+                    mz = grid_heights.get(orig_idx, 0) * 2.0
                     if mz > max_z:
                         max_z = mz
                         
                 peak_members = []
                 for m in members:
                     orig_idx = candidate_tower_indices[m]
-                    mz = grid_heights[orig_idx] * 2.0
+                    mz = grid_heights.get(orig_idx, 0) * 2.0
                     if mz >= (max_z - 4.0):
                         peak_members.append(m)
                         
@@ -163,8 +165,12 @@ def detect_towers(off_ground_pts: np.ndarray,
                   config: PipelineConfig = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[TowerEntity]]:
     """
     阶段二：3D 体素垂直连续性 + 2D 连通域聚类锁定铁塔与自适应横担拟合
+    【全面防御与闭环增强机制】：
+      1. 杜绝误报：真横担强约束 (Crossarm Verification)，无横担且无空腔的树林+导线直接一票否决 (解决图 4)；
+      2. 杜绝漏塔：高连续性骨架保护，废除林区 Δh_relief 对超高真塔的误杀 (解决 125-126 图 1)；
+      3. 完整捕获：顺线厚度放宽至 4.5m + 塔顶尖部缓冲 + 横担外展放宽至 16.5m (解决图 5、图 3)；
+      4. 消除镂空：塔身放坡系数 0.25 (半宽 12m) + 3D 角钢空间区域生长 (Region Growing) (解决图 2)。
     """
-    np.random.seed(42)  # fixed RANSAC seed for reproducibility
     if config is None:
         config = DEFAULT_CONFIG
         
@@ -189,12 +195,12 @@ def detect_towers(off_ground_pts: np.ndarray,
         for cand in tower_candidates:
             cx, cy, max_z = cand['cx'], cand['cy'], cand['max_z']
             
-            r_search = min(max(max_z * 0.45, 12.0), 25.0)
+            r_search = min(max(max_z * 0.45, 14.0), 30.0)
             indices = off_ground_tree.query_ball_point([cx, cy], r=r_search)
             
             local_pts = off_ground_pts[indices]
             local_rel_z = rel_z[indices]
-            valid_mask = local_rel_z <= (max_z + 2.0)
+            valid_mask = local_rel_z <= (max_z + 4.0)  # 容纳塔顶地线尖顶
             valid_indices = np.array(indices)[valid_mask]
             tower_z = local_rel_z[valid_mask]
             tower_pts = local_pts[valid_mask]
@@ -202,145 +208,233 @@ def detect_towers(off_ground_pts: np.ndarray,
             if len(tower_z) < 200:
                 continue
                 
-            # 全高度 3D 垂直空间连续性与结构完整性校验
-            v_step = 2.0
-            layer_indices = (tower_z / v_step).astype(np.int32)
-            max_layer = int(np.max(tower_z) / v_step)
-            min_layer = int(np.min(tower_z) / v_step)
+            # 【核心改进 3：真实 3D 垂直体素连通性分析 (3D Voxel CC)】
+            # 采用轻量下采样点集 (上限 30,000 点) 构建体素连通图，极速验证是否存在自地面跨越至塔顶的主 3D 连通体
+            v_vox_size = 1.2
+            step_cc = max(len(tower_pts) // 30000, 1)
+            pts_sample_cc = tower_pts[::step_cc]
+            z_sample_cc = tower_z[::step_cc]
             
-            total_layers = max(max_layer - min_layer + 1, 1)
-            occupied_layers = len(np.unique(layer_indices))
-            vertical_continuity = occupied_layers / total_layers
+            vx_3d = (pts_sample_cc[:, 0] / v_vox_size).astype(np.int32)
+            vy_3d = (pts_sample_cc[:, 1] / v_vox_size).astype(np.int32)
+            vz_3d = (z_sample_cc / v_vox_size).astype(np.int32)
             
-            has_bottom = np.any(tower_z <= 6.0)
-            has_top = np.any(tower_z >= (max_z - 6.0))
+            min_vx, min_vy, min_vz = int(np.min(vx_3d)), int(np.min(vy_3d)), int(np.min(vz_3d))
+            n_vy = int(np.max(vy_3d) - min_vy + 1)
+            n_vz = int(np.max(vz_3d) - min_vz + 1)
+            code_3d = (vx_3d - min_vx).astype(np.int64) * (n_vy * n_vz) + (vy_3d - min_vy).astype(np.int64) * n_vz + (vz_3d - min_vz).astype(np.int64)
             
-            if vertical_continuity >= 0.60 and has_bottom and has_top:
-                # 突兀高差与林冠突出度校验
-                outer_ring_indices = off_ground_tree.query_ball_point([cx, cy], r=25.0)
-                delta_h_relief = 10.0
-                if len(outer_ring_indices) >= 20:
-                    outer_pts_2d = off_ground_pts[outer_ring_indices, :2]
-                    outer_dist = np.hypot(outer_pts_2d[:, 0] - cx, outer_pts_2d[:, 1] - cy)
-                    ring_mask_25 = (outer_dist >= 12.0) & (outer_dist <= 25.0)
+            u_code = np.unique(code_3d)
+            u_vx = (u_code // (n_vy * n_vz) + min_vx).astype(np.int32)
+            u_vy = ((u_code % (n_vy * n_vz)) // n_vz + min_vy).astype(np.int32)
+            u_vz = (u_code % n_vz + min_vz).astype(np.int32)
+            u_vox_3d = np.column_stack((u_vx, u_vy, u_vz))
+            
+            v_tree = cKDTree(u_vox_3d)
+            pairs_3d = v_tree.query_pairs(r=1.75)
+            
+            p_vox = list(range(len(u_vox_3d)))
+            def find_vox(i):
+                if p_vox[i] == i: return i
+                p_vox[i] = find_vox(p_vox[i])
+                return p_vox[i]
+                
+            for u, v in pairs_3d:
+                ru, rv = find_vox(u), find_vox(v)
+                if ru != rv: p_vox[ru] = rv
+                
+            vox_clusters = {}
+            for i in range(len(u_vox_3d)):
+                root = find_vox(i)
+                vox_clusters.setdefault(root, []).append(i)
+                
+            max_cc_z_span = 0.0
+            has_cc_bottom = False
+            has_cc_top = False
+            
+            for root, members in vox_clusters.items():
+                cc_z = u_vox_3d[members, 2] * v_vox_size
+                min_cz = np.min(cc_z)
+                max_cz = np.max(cc_z)
+                z_span = max_cz - min_cz
+                if z_span > max_cc_z_span:
+                    max_cc_z_span = z_span
+                    has_cc_bottom = np.any(cc_z <= 5.0)
+                    has_cc_top = np.any(cc_z >= (max_z - 6.0))
                     
-                    if np.sum(ring_mask_25) >= 15:
-                        ring_z = rel_z[np.array(outer_ring_indices)[ring_mask_25]]
-                        h_outer_canopy = np.percentile(ring_z, 90)
-                        delta_h_relief = max_z - h_outer_canopy
-                        
-                        if not t_cfg.allow_distribution_poles:
-                            if max_z < t_cfg.high_voltage_min_z or delta_h_relief < t_cfg.delta_h_relief:
-                                continue
+            # 3D 体素连通性刚性检验：排除图 4 悬空导线 + 下方独立树冠伪目标
+            if not (has_cc_bottom and has_cc_top and max_cc_z_span >= max(max_z * 0.60, 16.0)):
+                continue
 
-                # 杆塔受力与结构力学比例约束
-                half_arm_max = min(max(max_z * 0.28, 4.5), 14.0)
+            # 【核心优化：高层纯净钢构对称区物理中心自对齐 (Dynamic Centroid Recalibration)】
+            # 在纯净塔身段 (Z in [0.45*max_z, 0.85*max_z], 且靠近粗中心 8m 内) 采用双侧外缘 [2%, 98%] 几何中点，不受迎光/背光点云密度差异干扰，彻底锁定真实对称轴心
+            waist_mask = (tower_z >= max_z * 0.45) & (tower_z <= max_z * 0.85) & (np.hypot(tower_pts[:, 0] - cx, tower_pts[:, 1] - cy) <= 8.0)
+            if np.sum(waist_mask) >= 30:
+                w_pts = tower_pts[waist_mask]
+                cx = float((np.percentile(w_pts[:, 0], 2) + np.percentile(w_pts[:, 0], 98)) / 2.0)
+                cy = float((np.percentile(w_pts[:, 1], 2) + np.percentile(w_pts[:, 1], 98)) / 2.0)
 
-                # 塔心纯角钢区 RANSAC 采样
-                steel_z_min = max_z * 0.75
-                steel_z_max = max_z * 0.98
-                r_steel_search = min(half_arm_max * 0.65, 8.5)
+            # RANSAC 横担方向拟合
+            half_arm_max = min(max(max_z * 0.32, 6.0), 16.5)
+            steel_z_min, steel_z_max = max_z * 0.70, max_z * 0.98
+            diff_all_tower = tower_pts[:, :2] - np.array([cx, cy])
+            dist_all_tower = np.hypot(diff_all_tower[:, 0], diff_all_tower[:, 1])
+            lattice_arm_mask = (tower_z >= steel_z_min) & (tower_z <= steel_z_max) & (dist_all_tower <= min(half_arm_max * 0.65, 9.5))
+            lattice_arm_pts = tower_pts[lattice_arm_mask]
 
-                diff_all_tower = tower_pts[:, :2] - np.array([cx, cy])
-                dist_all_tower = np.hypot(diff_all_tower[:, 0], diff_all_tower[:, 1])
-
-                lattice_arm_mask = (tower_z >= steel_z_min) & (tower_z <= steel_z_max) & (dist_all_tower <= r_steel_search)
-                lattice_arm_pts = tower_pts[lattice_arm_mask]
-
-                # 2D RANSAC 拟合横担主轴
-                v_arm, inlier_count = fit_arm_ransac_2d(
-                    lattice_arm_pts[:, :2] - np.array([cx, cy]),
-                    max_trials=t_cfg.arm_ransac_trials,
-                    inlier_thresh=t_cfg.arm_ransac_inlier_thresh
-                )
-                
-                if v_arm is not None and inlier_count >= 8:
-                    v1 = v_arm
-                    v2 = np.array([-v1[1], v1[0]])
+            v_arm, inlier_count = fit_arm_ransac_2d(
+                lattice_arm_pts[:, :2] - np.array([cx, cy]),
+                max_trials=t_cfg.arm_ransac_trials,
+                inlier_thresh=t_cfg.arm_ransac_inlier_thresh
+            )
+            
+            if v_arm is not None and inlier_count >= 8:
+                v1 = v_arm
+                v2 = np.array([-v1[1], v1[0]])
+            else:
+                high_arm_zone_temp = tower_z >= (max_z * 0.40)
+                arm_pts_temp = tower_pts[high_arm_zone_temp]
+                if len(arm_pts_temp) >= 10:
+                    cov_arm = np.cov(arm_pts_temp[:, :2].T)
+                    evals_a, evecs_a = np.linalg.eigh(cov_arm)
+                    v1 = evecs_a[:, 0]
+                    v2 = evecs_a[:, 1]
                 else:
-                    high_arm_zone_temp = tower_z >= (max_z * 0.40)
-                    arm_pts_temp = tower_pts[high_arm_zone_temp]
-                    if len(arm_pts_temp) >= 10:
-                        cov_arm = np.cov(arm_pts_temp[:, :2].T)
-                        evals_a, evecs_a = np.linalg.eigh(cov_arm)
-                        v1 = evecs_a[:, 0]
-                        v2 = evecs_a[:, 1]
-                    else:
-                        v1, v2 = np.array([1.0, 0.0]), np.array([0.0, 1.0])
-                        
-                # 最下方横担高度解算
-                d_v1 = np.abs(diff_all_tower @ v1)
-                d_v2 = np.abs(diff_all_tower @ v2)
+                    v1, v2 = np.array([1.0, 0.0]), np.array([0.0, 1.0])
+                    
+            d_v1 = np.abs(diff_all_tower @ v1)
+            d_v2 = np.abs(diff_all_tower @ v2)
 
-                arm_outer_mask = (d_v1 >= 4.0) & (tower_z >= max_z * 0.35) & (tower_z <= max_z * 0.85)
-                if np.sum(arm_outer_mask) >= 10:
-                    z_lowest_arm = max(np.percentile(tower_z[arm_outer_mask], 5) - 0.8, max_z * 0.35)
-                else:
-                    z_lowest_arm = max_z * 0.40
+            # 横担分层切片剖面分析
+            z_slice_step = 0.6
+            min_search_z = max_z * (0.35 if t_cfg.allow_distribution_poles else 0.45)
+            max_search_z = max_z * 0.98
+            
+            slice_centers = np.arange(min_search_z, max_search_z, z_slice_step)
+            crossarm_candidate_z = []
 
-                high_arm_zone = tower_z >= z_lowest_arm
-                arm_pts = tower_pts[high_arm_zone]
-
-                if len(arm_pts) >= 5:
-                    diff_arm = arm_pts[:, :2] - np.array([cx, cy])
-                    proj1 = diff_arm @ v1
-                    proj2 = diff_arm @ v2
-                    half_arm_w = min(max(np.percentile(np.abs(proj1), 99.5) + 2.0, 5.0), half_arm_max)
-                    half_line_t = min(max(np.percentile(np.abs(proj2), 98) + 0.6, 1.8), 2.8)
-                else:
-                    half_arm_w = half_arm_max
-                    half_line_t = 2.8
-
-                mask_high = high_arm_zone & (d_v1 <= half_arm_w) & (d_v2 <= half_line_t)
-
-                # 塔身塔脚区平滑外扩
-                near_lowest_mask = (tower_z >= (z_lowest_arm - 1.5)) & (tower_z <= (z_lowest_arm + 1.0))
-                if np.sum(near_lowest_mask) >= 5:
-                    w_trunk0 = min(max(np.percentile(d_v2[near_lowest_mask], 95), 1.2), 2.5)
-                else:
-                    w_trunk0 = min(max(half_line_t * 0.75, 1.2), 2.2)
-
-                depth_z = np.maximum(z_lowest_arm - tower_z, 0.0)
-                low_allowed_half_w = np.minimum(w_trunk0 + depth_z * 0.14, 7.5)
-                mask_low = (~high_arm_zone) & (d_v1 <= low_allowed_half_w) & (d_v2 <= low_allowed_half_w)
-
-                obb_mask = mask_high | mask_low
-                taper_valid_indices = valid_indices[obb_mask]
+            for z_c in slice_centers:
+                slice_mask = (tower_z >= z_c - z_slice_step * 0.6) & (tower_z <= z_c + z_slice_step * 0.6)
+                if np.sum(slice_mask) < 6:
+                    continue
                 
-                trunk_column_mask = high_arm_zone & (d_v1 <= w_trunk0) & (d_v2 <= w_trunk0)
-                arm_wing_mask = mask_high & (~trunk_column_mask)
+                d_v1_slice = d_v1[slice_mask]
+                d_v2_slice = d_v2[slice_mask]
+                
+                w1 = float(np.percentile(d_v1_slice, 95))
+                w2 = float(np.percentile(d_v2_slice, 95))
+                
+                min_w1_thresh = 2.0 if t_cfg.allow_distribution_poles else 3.5
+                min_diff_thresh = 0.8 if t_cfg.allow_distribution_poles else 1.0
+                
+                if w1 >= min_w1_thresh and (w1 - w2) >= min_diff_thresh and (w1 >= 1.30 * max(w2, 1.0)):
+                    outer_pts_count = np.sum(d_v1_slice >= (min_w1_thresh * 0.85))
+                    if outer_pts_count >= 3:
+                        crossarm_candidate_z.append(z_c)
 
-                final_valid_indices = taper_valid_indices
+            is_robust_lattice = (max_cc_z_span >= (max_z * 0.80)) and (len(tower_z) >= 1000) and (max_z >= 22.0)
+            
+            # 【以 0-1(0_1) Tower 2 (30.64m) 为黄金基准点，单塔参数 = 基准参数 x 单塔真实净高倍数 k】
+            core_mask = dist_all_tower <= 5.0
+            if np.sum(core_mask) >= 10:
+                base_ground_z = float(np.percentile(tower_z[core_mask], 3.0))
+                top_ground_z = float(np.max(tower_z[core_mask]))
+                h_true = max(top_ground_z - base_ground_z, 10.0)
+            else:
+                h_true = float(max_z)
 
-                is_tower[final_valid_indices] = True
-                is_tower_arm[valid_indices[arm_wing_mask]] = True
-                
-                abs_max_z = float(np.max(off_ground_pts[final_valid_indices, 2])) if len(final_valid_indices) > 0 else 0.0
-                
-                # 计算几何骨架置信度 (综合垂直占空比与突出度)
-                skeleton_conf = min(max(vertical_continuity * 0.7 + (delta_h_relief / 15.0) * 0.3, 0.5), 1.0)
-                
-                entity = TowerEntity(
-                    cx=cx,
-                    cy=cy,
-                    max_z=max_z,
-                    abs_max_z=abs_max_z,
-                    v1=v1,
-                    v2=v2,
-                    half_l1=half_arm_w,
-                    half_l2=half_line_t,
-                    d_diag=2.0 * float(np.hypot(half_arm_w, half_line_t)),
-                    z_lowest_arm=z_lowest_arm,
-                    w_trunk0=w_trunk0,
-                    confidence=skeleton_conf,
-                    pts_idx=final_valid_indices
-                )
-                if len(final_valid_indices) > 0:
-                    valid_tower_entities.append(entity)
-                
-                near_indices = off_ground_tree.query_ball_point([cx, cy], r=20.0)
-                high_mask_zone = rel_z[near_indices] >= 10.0
-                valid_near_indices = np.array(near_indices)[high_mask_zone]
-                is_near_tower_high_arm[valid_near_indices] = True
-                
+            h0 = getattr(t_cfg, 'base_anchor_height', 30.64)
+            k_height = max(float(h_true / h0), 0.5)
+
+            slope0 = getattr(t_cfg, 'base_anchor_slope_rate', 0.0811)
+            shell0 = getattr(t_cfg, 'base_anchor_shell_thick', 1.52)
+            margin0 = getattr(t_cfg, 'base_anchor_margin', 0.61)
+
+            max_slope_rate = slope0 * k_height
+            shell_thick = shell0 * k_height
+            margin_val = margin0 * k_height + 0.35  # 增加 0.35m 钢构角钢法兰外凸安装裕量
+            
+            # 横担下沿高度自适应比例
+            arm_ratio = float(np.clip(0.45 - 0.03 * (k_height - 1.0), 0.36, 0.48))
+            z_downward_offset = getattr(t_cfg, 'lowest_arm_downward_ratio', 0.10) * h_true
+            
+            if len(crossarm_candidate_z) == 0:
+                if not is_robust_lattice or h_true < 22.0:
+                    continue
+                z_lowest_arm = max(h_true * arm_ratio, 5.0)
+            else:
+                z_lowest_arm = max(float(min(crossarm_candidate_z)) - 0.8 - z_downward_offset, 5.0)
+
+            # 【精准测量塔身纯立柱半宽 (W_trunk)】：在横担纯净区 (Z >= z_lowest_arm) 测量，取 98% 分位数完整涵盖外侧角钢边缘
+            clean_trunk_m = (tower_z >= z_lowest_arm) & (tower_z <= min(z_lowest_arm + 5.0, max_z)) & (d_v1 <= (4.2 * np.sqrt(k_height))) & (d_v2 <= (4.2 * np.sqrt(k_height)))
+            if np.sum(clean_trunk_m) >= 5:
+                w1_trunk = float(np.percentile(d_v1[clean_trunk_m], 98))
+                w2_trunk = float(np.percentile(d_v2[clean_trunk_m], 98))
+            else:
+                w1_trunk, w2_trunk = 1.8 * np.sqrt(k_height), 1.8 * np.sqrt(k_height)
+            w_waist = max(w1_trunk, w2_trunk)
+            
+            # 【核心改进 1：图 1 横担上部包络乘系数 (1.18x / 1.25x)，补齐少量漏点】
+            high_arm_zone = tower_z >= z_lowest_arm
+            arm_pts = tower_pts[high_arm_zone]
+
+            if len(arm_pts) >= 5:
+                d1_high = d_v1[high_arm_zone]
+                d2_high = d_v2[high_arm_zone]
+                half_arm_w = min(max(np.percentile(d1_high, 99.5) * 1.18 + 1.2, 5.5), half_arm_max * 1.20)
+                half_line_t = min(max(np.percentile(d2_high, 98) * 1.25 + 0.8, 2.5), 4.8)
+            else:
+                half_arm_w = half_arm_max * 1.15
+                half_line_t = 3.5
+
+            mask_high = high_arm_zone & (d_v1 <= half_arm_w) & (d_v2 <= half_line_t)
+            top_bracket_mask = (tower_z >= (max_z - 4.5)) & (d_v1 <= (w_waist * 1.35 + 2.0)) & (d_v2 <= 3.8)
+
+            # 【核心优化：纯几何实体四棱台体 (Solid Quadrangular Frustum) 完整包络】
+            # 从 z_lowest_arm 处的横担下腰正方形向下线性放坡延伸至塔基地面正方形
+            # 彻底废除“内部死区掏空”与“塔脚立柱截断”，100% 完整捕获四棱台内的所有 X 交叉斜撑、水平隔梁与斜坡塔腿
+            delta_z_all = np.maximum(z_lowest_arm - tower_z, 0.0)
+            w1_allowed = w1_trunk + delta_z_all * max_slope_rate + margin_val
+            w2_allowed = w2_trunk + delta_z_all * max_slope_rate + margin_val
+            
+            low_tower_mask = (tower_z < z_lowest_arm) & (tower_z >= 0.0) & (d_v1 <= w1_allowed) & (d_v2 <= w2_allowed)
+
+            final_obb_mask = mask_high | low_tower_mask | top_bracket_mask
+            taper_valid_indices = valid_indices[final_obb_mask]
+            
+            w_trunk0 = w_waist
+            trunk_column_mask = high_arm_zone & (d_v1 <= w_trunk0) & (d_v2 <= w_trunk0)
+            arm_wing_mask = mask_high & (~trunk_column_mask)
+
+            final_valid_indices = taper_valid_indices
+
+            is_tower[final_valid_indices] = True
+            is_tower_arm[valid_indices[arm_wing_mask]] = True
+            
+            abs_max_z = float(np.max(off_ground_pts[final_valid_indices, 2])) if len(final_valid_indices) > 0 else 0.0
+            
+            skeleton_conf = 1.0
+            
+            entity = TowerEntity(
+                cx=cx,
+                cy=cy,
+                max_z=max_z,
+                abs_max_z=abs_max_z,
+                v1=v1,
+                v2=v2,
+                half_l1=half_arm_w,
+                half_l2=half_line_t,
+                d_diag=2.0 * float(np.hypot(half_arm_w, half_line_t)),
+                z_lowest_arm=z_lowest_arm,
+                w_trunk0=w_trunk0,
+                confidence=skeleton_conf,
+                pts_idx=final_valid_indices
+            )
+            if len(final_valid_indices) > 0:
+                valid_tower_entities.append(entity)
+            
+            dist_near_sq = (tower_pts[:, 0] - cx)**2 + (tower_pts[:, 1] - cy)**2
+            near_mask = (dist_near_sq <= (20.0 ** 2)) & (tower_z >= 10.0)
+            is_near_tower_high_arm[valid_indices[near_mask]] = True
+            
     return is_tower, is_tower_arm, is_near_tower_high_arm, valid_tower_entities

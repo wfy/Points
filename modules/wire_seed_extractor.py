@@ -14,7 +14,11 @@ def extract_wire_seeds(high_pts: np.ndarray,
                        arm_linearity_thresh: float = 0.65,
                        bundle_adapt_linearity_thresh: float = 0.70,
                        enable_bundle_adapt: bool = True,
-                       chunk_size: int = 5000) -> np.ndarray:
+                       chunk_size: int = 5000,
+                       wire_seed_l3_max: float = 0.30,
+                       wire_seed_l3_bundle_max: float = 0.60,
+                       wire_seed_density_max: int = 60,
+                       **kwargs) -> np.ndarray:
     """
     基于体素降采样预筛选、分批流式局部协方差 (PCA) 与分裂导线自适应姿态粗筛导线种子点
     采用 chunk_size=5000 分批流式检索，将瞬时内存峰值从 4.8GB 降低至 850MB 以下

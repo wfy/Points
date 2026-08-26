@@ -9,7 +9,9 @@ def cluster_wire_candidates(points: np.ndarray,
                             high_pts: np.ndarray,
                             high_indices: np.ndarray,
                             cable_seed_indices: np.ndarray,
-                            c_voxel_size: float = 0.5) -> Tuple[np.ndarray, np.ndarray, List[WireCluster]]:
+                            c_voxel_size: float = 0.5,
+                            tower_infos: Optional[List[Union[TowerEntity, dict]]] = None,
+                            **kwargs) -> Tuple[np.ndarray, np.ndarray, List[WireCluster]]:
     """
     基于体素连通图聚类、共线姿态验证与 3D 悬链线物理建模，聚合导线候选段
     """
