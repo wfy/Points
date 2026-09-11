@@ -189,7 +189,8 @@ def filter_canopy_by_probes(final_cable_pts: np.ndarray,
         if len(tower_infos) > 0:
             for t_info in tower_infos:
                 d_xy = np.hypot(cluster.center[0] - t_info['cx'], cluster.center[1] - t_info['cy'])
-                if d_xy < 22.0 and cluster.center[2] < t_info['abs_max_z'] - 22.0:
+                # 仅对塔心立柱极小区域 (d_xy < 8m) 且低于塔顶 28m 以下的塔脚地面过滤，保全横担与跳线
+                if d_xy < 8.0 and cluster.center[2] < t_info['abs_max_z'] - 28.0:
                     is_under_tower_veg = True
                     break
         if is_under_tower_veg:
@@ -199,47 +200,48 @@ def filter_canopy_by_probes(final_cable_pts: np.ndarray,
         proj = np.dot(c_pts - cluster.center, cluster.dir)
         p_min, p_max = np.min(proj), np.max(proj)
         span_len = p_max - p_min
-        if span_len < 3.0 or span_len > 45.0:
+
+        # 走向与主轴校验：未拟合悬链线的簇若走向与线路轴线偏角 > 35 度，直接标记为 suspect
+        if getattr(cluster, 'catenary', None) is None and len(tower_infos) >= 1:
+            c_dir_xy = cluster.dir[:2]
+            c_norm = np.linalg.norm(c_dir_xy)
+            if c_norm > 1e-3:
+                c_dir_unit = c_dir_xy / c_norm
+                if len(tower_infos) >= 2:
+                    t_centers = np.array([[t['cx'], t['cy']] for t in tower_infos])
+                    dists_t = np.hypot(t_centers[:, 0] - cluster.center[0], t_centers[:, 1] - cluster.center[1])
+                    s_idx = np.argsort(dists_t)
+                    d_ab = t_centers[s_idx[1]] - t_centers[s_idx[0]]
+                    axis_u = d_ab / max(np.linalg.norm(d_ab), 1e-3)
+                else:
+                    axis_u = tower_infos[0]['v2']
+                cos_span = abs(float(np.dot(c_dir_unit, axis_u)))
+                pitch = abs(cluster.dir[2])
+                if cos_span < 0.819 or pitch > 0.45:
+                    suspect_line_ids.add(l_id)
+                    continue
+
+        if span_len < 3.0:
             continue
             
-        sample_fractions = np.linspace(0.1, 0.9, 9)
+        # 拟合了悬链线的长跨导线 (>= 18m) 物理约束足够强，免除探针误杀
+        # 未拟合悬链线的聚类簇，必须经过空气隔离层检验，防止大面积山坡树木漏网！
+        if getattr(cluster, 'catenary', None) is not None and span_len >= 18.0:
+            continue
+            
+        # 对短簇或未拟合悬链线簇进行紧贴下方空气隔离层 (Air Gap) 检测：
+        # 树冠伪脊线下方紧贴密集体点云 (0.4m ~ 2.2m 实心)；真导线紧贴下方为纯净空气
+        sample_fractions = np.linspace(0.15, 0.85, 7)
         sample_positions = cluster.center + np.outer(p_min + sample_fractions * span_len, cluster.dir)
         
-        steps = np.arange(1, 13)[:, None]
-        probe_offsets = np.zeros((12, 3))
-        probe_offsets[:, 2] = -steps[:, 0] * 1.0
-        
-        all_probe_centers = (sample_positions[:, None, :] + probe_offsets[None, :, :]).reshape(-1, 3)
-        probe_neighbor_lists = off_tree.query_ball_point(all_probe_centers.astype(np.float32), r=1.5)
-        
-        deep_probe_count = 0
-        for f_idx in range(9):
-            sample_pos = sample_positions[f_idx]
-            consecutive_steps = 0
-            max_consecutive = 0
-            
-            for step_idx in range(12):
-                probe_flat_idx = f_idx * 12 + step_idx
-                near_idx = probe_neighbor_lists[probe_flat_idx]
+        solid_canopy_count = 0
+        for s_pos in sample_positions:
+            probe_center = s_pos - np.array([0.0, 0.0, 1.2])
+            near_idx = off_tree.query_ball_point(probe_center.astype(np.float32), r=1.0)
+            if len(near_idx) >= 6:
+                solid_canopy_count += 1
                 
-                if len(near_idx) > 0:
-                    near_pts = off_ground_pts[near_idx]
-                    xy_dists = np.linalg.norm(near_pts[:, :2] - sample_pos[:2], axis=1)
-                    below_mask = (xy_dists <= 1.5) & (near_pts[:, 2] <= sample_pos[2] - 0.8)
-                    
-                    if np.any(below_mask):
-                        consecutive_steps += 1
-                        if consecutive_steps > max_consecutive:
-                            max_consecutive = consecutive_steps
-                    else:
-                        consecutive_steps = 0
-                else:
-                    consecutive_steps = 0
-                    
-            if max_consecutive >= 3:
-                deep_probe_count += 1
-                
-        if deep_probe_count >= 4:
+        if solid_canopy_count >= 5:
             suspect_line_ids.add(l_id)
             
     return suspect_line_ids
@@ -308,7 +310,10 @@ def track_and_bridge_powerlines(points: np.ndarray,
             end2 = pts[np.argmax(proj)]
             
             cat_model: Optional[CatenaryModel] = cluster.catenary if use_catenary_tracking else None
-            
+            # 物理防护：仅对拟合了有效悬链线模型的导线执行物理轨道追踪；未拟合悬链线的簇严禁在林区步进搜集
+            if cat_model is None:
+                continue
+
             for start_pt, init_dir in [(end1, -cluster.dir), (end2, cluster.dir)]:
                 curr_pt = start_pt
                 curr_dir = init_dir
@@ -429,7 +434,12 @@ def track_and_bridge_powerlines(points: np.ndarray,
                             valid_pts = high_pts[valid_idx]
                             max_proj_idx = np.argmax(proj_len[valid_mask])
                             next_pt = valid_pts[max_proj_idx]
-                            
+
+                            # 树冠空气隔离层校验：若追踪前进点紧贴实心树冠顶，立即终止该方向追踪，防止蔓延进入山林
+                            under_hits = all_high_tree.query_ball_point(next_pt - np.array([0.0, 0.0, 1.2]), r=0.8)
+                            if len(under_hits) >= 5:
+                                break
+
                             new_dir = next_pt - curr_pt
                             norm_new = np.linalg.norm(new_dir)
                             if norm_new > 1e-3:

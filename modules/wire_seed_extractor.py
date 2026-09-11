@@ -67,26 +67,45 @@ def extract_wire_seeds(high_pts: np.ndarray,
                             pt_xy = high_pts[orig_high_idx, :2]
                             dists_to_towers = np.hypot(tower_centers[:, 0] - pt_xy[0], tower_centers[:, 1] - pt_xy[1])
                             min_t_idx = np.argmin(dists_to_towers)
-                            if dists_to_towers[min_t_idx] <= 50.0:
-                                t_v2 = tower_infos[min_t_idx]['v2']
-                                v_dir_2d = v1[:2]
-                                norm_dir = np.linalg.norm(v_dir_2d)
-                                if norm_dir > 1e-3:
-                                    v_dir_2d_unit = v_dir_2d / norm_dir
-                                    cos_theta = abs(np.dot(v_dir_2d_unit, t_v2))
-                                    if cos_theta < 0.906:  # cos(25 deg) 过滤非线路方向噪声
-                                        pass_dir_check = False
-                                    elif cos_theta >= 0.965: # cos(15 deg) 极强线路走向一致性
-                                        is_strongly_aligned_with_line = True
+                            v_dir_2d = v1[:2]
+                            norm_dir = np.linalg.norm(v_dir_2d)
+                            if norm_dir > 1e-3:
+                                v_dir_2d_unit = v_dir_2d / norm_dir
+                                if dists_to_towers[min_t_idx] <= 50.0:
+                                    t_v2 = tower_infos[min_t_idx]['v2']
+                                    cos_theta = abs(float(np.dot(v_dir_2d_unit, t_v2)))
+                                else:
+                                    # 档距中间 (>50m): 与跨档主轴走向校验 (杜绝斜生树枝)
+                                    if len(tower_centers) >= 2:
+                                        sorted_t_idx = np.argsort(dists_to_towers)
+                                        t_a, t_b = sorted_t_idx[0], sorted_t_idx[1]
+                                        d_ab = tower_centers[t_b] - tower_centers[t_a]
+                                        norm_ab = np.linalg.norm(d_ab)
+                                        span_axis = d_ab / max(norm_ab, 1e-3)
+                                    else:
+                                        span_axis = tower_infos[min_t_idx]['v2']
+                                    cos_theta = abs(float(np.dot(v_dir_2d_unit, span_axis)))
+
+                                if cos_theta < 0.819:  # cos(35 deg) 过滤偏角 > 35 度的杂乱树枝
+                                    pass_dir_check = False
+                                elif cos_theta >= 0.965:  # cos(15 deg) 极强线路走向一致性
+                                    is_strongly_aligned_with_line = True
+
+                        # 截面厚度与局部密度约束：杜绝茂密实心树冠顶检出为种子
+                        l3_scale = float(np.sqrt(max(evals[0], 0.0)))
+                        is_slim = l3_scale <= wire_seed_l3_max
+                        is_bundle = (l3_scale <= wire_seed_l3_bundle_max) and (len(neighbors) <= wire_seed_density_max)
+                        if not (is_slim or is_bundle or is_arm):
+                            pass_dir_check = False
                         
                         if pass_dir_check:
                             # 判定条件：
-                            # 1. 常规高线性度导线 (linearity > 0.82)
+                            # 1. 常规高线性度导线 (linearity > 0.80, 倾角合理 abs(v1[2]) < 0.65)
                             # 2. 横担近邻敏化区导线 (is_arm & linearity > 0.65)
                             # 3. 分裂导线多尺度自适应 (强线路对齐 & linearity > 0.70)
-                            is_candidate = (linearity > linearity_thresh and abs(v1[2]) < 0.85) or \
+                            is_candidate = (linearity > linearity_thresh and abs(v1[2]) < 0.65) or \
                                            (is_arm and linearity > arm_linearity_thresh) or \
-                                           (enable_bundle_adapt and is_strongly_aligned_with_line and linearity > bundle_adapt_linearity_thresh and abs(v1[2]) < 0.80)
+                                           (enable_bundle_adapt and is_strongly_aligned_with_line and linearity > bundle_adapt_linearity_thresh and abs(v1[2]) < 0.65)
                             
                             if is_candidate:
                                 cable_seed_indices.append(high_indices[orig_high_idx])

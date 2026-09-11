@@ -80,7 +80,7 @@ def extract_wires_by_corridor_slices(points: np.ndarray,
             n_span = np.array([-u_span[1], u_span[0]])     # 档段水平法向单位矢量 (2D)
 
             half_arm_max = max(float(t1.get('half_l1', 10.0)), float(t2.get('half_l1', 10.0)), 8.0)
-            corridor_half_w = half_arm_max + 4.5           # 电气走廊横向有效半宽 (m)
+            corridor_half_w = max(half_arm_max + 12.0, 30.0)  # 放宽至至少 30m，足以容纳所有边相与 15°~25° 风偏导线
 
             # 提取走廊内候选点云
             diff_pts_2d = off_ground_pts[:, :2] - c1
@@ -176,7 +176,7 @@ def extract_wires_by_corridor_slices(points: np.ndarray,
         n_out = np.array([-u_out[1], u_out[0]])
 
         c_t = np.array([float(t_info['cx']), float(t_info['cy'])])
-        exit_half_w = max(float(t_info.get('half_l1', 8.0)), 8.0) + 4.5
+        exit_half_w = max(float(t_info.get('half_l1', 8.0)) + 12.0, 30.0)
         z_coords = off_ground_pts[:, 2]
         diff_t = off_ground_pts[:, :2] - c_t
         s_out = diff_t @ u_out
@@ -276,6 +276,9 @@ def _extract_wires_in_corridor(cand_pts: np.ndarray,
                 #    (树冠 1.0m 球内通常 100+ 点，真导线 30~60 点，可物理分离)
                 v1_xy = v1[:2]
                 norm_xy = np.linalg.norm(v1_xy)
+                # 水平方向必须高度平行于线路主走向 (走廊内部偏角 <= 35度 即 cos >= 0.819；近塔处放宽至 0.70 容纳耐张跳线引流)
+                is_near_tower = (cand_s[sample_idx[s_i]] <= 8.0) or (cand_s[sample_idx[s_i]] >= span_length - 8.0)
+                cos_min_req = 0.70 if is_near_tower else 0.819 # cos(35 deg)
                 if norm_xy > 1e-3:
                     v1_xy_unit = v1_xy / norm_xy
                     cos_align = abs(float(np.dot(v1_xy_unit, u_span)))
@@ -289,7 +292,7 @@ def _extract_wires_in_corridor(cand_pts: np.ndarray,
                 # 种子 z 下限: 排除树冠主体扫描线伪种子 (导线最低不低于塔最低横担-弧垂下探)
                 z_ok = cand_pts[sample_idx[s_i], 2] >= z_seed_floor
 
-                if linearity >= 0.60 and abs(v1[2]) <= 0.65 and cos_align >= 0.70 and (is_slim_seed or is_bundle_seed) and z_ok:
+                if linearity >= 0.60 and abs(v1[2]) <= 0.65 and cos_align >= cos_min_req and (is_slim_seed or is_bundle_seed) and z_ok:
                     pure_wire_sample_idx.append(sample_idx[s_i])
 
     if len(pure_wire_sample_idx) < 3:
@@ -445,11 +448,19 @@ def _extract_wires_in_corridor(cand_pts: np.ndarray,
                 fit_ok = True
                 break
             if not retry_found:
-                # 检查是否为极高线性度的平直外延导线簇 (PCA 线型度 >= 0.82 且截面纤细)
-                if len(sub_pts) >= 8:
+                # 拟合失败但聚类成线：后验保全聚类本体，绝不一票否决！
+                if len(sub_pts) >= 6:
                     cov_raw = np.cov(sub_pts.T)
-                    evs_raw = np.linalg.eigvalsh(cov_raw)
-                    if evs_raw[2] > 0 and (evs_raw[2] - evs_raw[1]) / evs_raw[2] >= 0.80:
+                    evs_raw, evecs_raw = np.linalg.eigh(cov_raw)
+                    lin_raw = (evs_raw[2] - evs_raw[1]) / evs_raw[2] if evs_raw[2] > 0 else 0
+                    v1_raw = evecs_raw[:, 2]
+                    v1_raw_xy = v1_raw[:2]
+                    norm_raw = np.linalg.norm(v1_raw_xy)
+                    cos_raw_align = abs(float(np.dot(v1_raw_xy / norm_raw, u_span))) if norm_raw > 1e-3 else 0.0
+                    pitch_raw = abs(v1_raw[2])
+
+                    # 导线物理准则：线性度充足、水平走向与主轴夹角 <= 35 度 (cos >= 0.819)，且绝非陡峭下坠山坡 (|v1[2]| <= 0.45)
+                    if lin_raw >= 0.50 and cos_raw_align >= 0.819 and pitch_raw <= 0.45:
                         _sub_pts = sub_pts
                         _sub_global = sub_global
                         sub_d_used = sub_d
@@ -675,15 +686,30 @@ def extract_wires_topdown(points: np.ndarray,
                 jumper_line_id = len(merged_confirmed) + 1
                 for j_pt in new_jumpers:
                     final_point_line_id[j_pt] = jumper_line_id
+                j_pts = points[new_jumpers]
+                if len(j_pts) >= 4:
+                    j_cov = np.cov(j_pts.T)
+                    j_evals, j_evecs = np.linalg.eigh(j_cov)
+                    j_dir = j_evecs[:, 2]
+                    j_lin = float((j_evals[2] - j_evals[1]) / j_evals[2]) if j_evals[2] > 0 else 0.6
+                else:
+                    j_dir = np.array([1.0, 0.0, 0.0])
+                    j_lin = 0.6
                 merged_confirmed.append(WireCluster(
                     members=list(range(len(new_jumpers))),
-                    center=np.mean(points[new_jumpers], axis=0),
-                    dir=np.array([1.0, 0.0, 0.0]),
-                    span=float(np.linalg.norm(np.ptp(points[new_jumpers], axis=0))),
-                    linearity=0.6,
+                    center=np.mean(j_pts, axis=0),
+                    dir=j_dir,
+                    span=float(np.linalg.norm(np.ptp(j_pts, axis=0))),
+                    linearity=j_lin,
                     min_var=0.2,
                     catenary=None
                 ))
+
+    # 铁塔点硬互斥保证 (零退化与高查准率保障)
+    tower_pts_idx = off_ground_idx[is_tower] if np.any(is_tower) else np.array([], dtype=int)
+    if len(tower_pts_idx) > 0 and len(merged_cable_indices) > 0:
+        merged_cable_indices = np.setdiff1d(merged_cable_indices, tower_pts_idx)
+        final_point_line_id[tower_pts_idx] = 0
 
     return ExtractionResult(
         cable_pts_idx=merged_cable_indices,

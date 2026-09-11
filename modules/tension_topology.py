@@ -73,12 +73,10 @@ def extract_tension_jumpers(points: np.ndarray,
         proj_v1 = np.abs(diff_2d @ v1)
         proj_v2 = np.abs(diff_2d @ v2)
 
-        # 排除塔心核心立柱 (proj_v1 <= w_trunk0 * 0.8 且 proj_v2 <= w_trunk0 * 0.8 且被标记为塔)
-        core_trunk = (proj_v1 <= w_trunk0 * 0.9) & (proj_v2 <= w_trunk0 * 0.9) & near_is_tower
-
-        # 跳线必须在横担横向范围及稍外延处 (proj_v1 <= half_l1 + 3.0)，且在走廊走向附近 (proj_v2 <= half_l2 + 5.0)
+        # 跳线必须在横担横向范围及稍外延处 (proj_v1 <= half_l1 + 3.5)，且在走廊走向附近 (proj_v2 <= half_l2 + 6.0)
+        # 严格排除铁塔主体角钢骨架与塔心立柱，跳线必须为独立悬垂导线
         z_mask = (near_rel_z >= max(z_low_arm - 4.0, 6.0)) & (near_rel_z <= (max_z + 0.5))
-        spatial_mask = z_mask & (proj_v1 <= half_l1 + 3.5) & (proj_v2 <= half_l2 + 6.0) & (~core_trunk)
+        spatial_mask = z_mask & (proj_v1 <= half_l1 + 3.5) & (proj_v2 <= half_l2 + 6.0) & (~near_is_tower)
 
         cand_sub_idx = np.where(spatial_mask)[0]
         if len(cand_sub_idx) < 6:
@@ -164,7 +162,9 @@ def extract_tension_jumpers(points: np.ndarray,
                     jumper_global_indices.append(cand_global[abs_i])
 
     if len(jumper_global_indices) > 0:
-        return np.unique(jumper_global_indices)
+        tower_indices = off_ground_idx[is_tower] if np.any(is_tower) else np.array([], dtype=int)
+        valid_jumpers = np.setdiff1d(np.unique(jumper_global_indices), tower_indices)
+        return valid_jumpers
     return np.array([], dtype=int)
 
 
