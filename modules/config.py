@@ -30,7 +30,7 @@ class TowerConfig:
     min_tower_rel_z: float = 28.0
     min_pts_count: int = 500
     continuity_ratio: float = 0.65
-    nms_radius: float = 25.0
+    nms_radius: float = 14.0
     high_voltage_min_z: float = 28.0
     delta_h_relief: float = 8.0
     arm_ransac_trials: int = 100
