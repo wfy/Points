@@ -87,26 +87,32 @@ def fast_classify_and_color_powerline(las_input_path: str,
         if _parts:
             tower_below_arm_pts_idx = np.unique(np.concatenate(_parts))
 
-    # 3. 阶段三：PCA 特征姿态分析 + 连续 3D 悬链线物理轨道追踪缝合
-    t3 = time.time()
-    print("-> 3/4 执行 PCA 特征姿态分析与 3D 悬链线完整连续追踪...")
-    ext_res = extract_and_track_powerlines(
-        points=points,
-        off_ground_pts=off_ground_pts,
-        off_ground_idx=off_ground_idx,
-        rel_z=rel_z,
-        is_tower=is_tower,
-        is_near_tower_high_arm=is_near_tower_high_arm,
-        tower_infos=tower_infos,
-        is_tower_arm=is_tower_arm,
-        config=config
-    )
-    cable_pts_idx = ext_res.cable_pts_idx
-    point_line_id = ext_res.point_line_id
-    all_confirmed = ext_res.all_confirmed
-    suspect_line_ids = ext_res.suspect_line_ids
-    find_line_func = ext_res.find_line_func
-    print(f"   阶段三完成 (耗时: {time.time() - t3:.2f}s) | 提取导线点: {len(cable_pts_idx):,} 点 | 聚合线路簇: {len(all_confirmed)} 组")
+    # 3. 阶段三：PCA 特征姿态分析 + 连续 3D 悬链线物理轨道追踪缝合 (【按需临时注释 M3 导线识别】)
+    # t3 = time.time()
+    # print("-> 3/4 执行 PCA 特征姿态分析与 3D 悬链线完整连续追踪...")
+    # ext_res = extract_and_track_powerlines(
+    #     points=points,
+    #     off_ground_pts=off_ground_pts,
+    #     off_ground_idx=off_ground_idx,
+    #     rel_z=rel_z,
+    #     is_tower=is_tower,
+    #     is_near_tower_high_arm=is_near_tower_high_arm,
+    #     tower_infos=tower_infos,
+    #     is_tower_arm=is_tower_arm,
+    #     config=config
+    # )
+    # cable_pts_idx = ext_res.cable_pts_idx
+    # point_line_id = ext_res.point_line_id
+    # all_confirmed = ext_res.all_confirmed
+    # suspect_line_ids = ext_res.suspect_line_ids
+    # find_line_func = ext_res.find_line_func
+    # print(f"   阶段三完成 (耗时: {time.time() - t3:.2f}s) | 提取导线点: {len(cable_pts_idx):,} 点 | 聚合线路簇: {len(all_confirmed)} 组")
+    cable_pts_idx = np.array([], dtype=int)
+    point_line_id = np.zeros(num_points, dtype=int)
+    all_confirmed = []
+    suspect_line_ids = set()
+    find_line_func = lambda x: x
+    print("-> 3/4 [已注释 M3 导线识别阶段]")
 
     # 4. 阶段四：导线依附拓扑校验 (导线识别注释时，直接保留检测到的杆塔点)
     # tower_pts_idx, valid_tower_count, demoted_pts_idx = validate_tower_topology(

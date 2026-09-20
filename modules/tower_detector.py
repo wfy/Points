@@ -1,173 +1,40 @@
 import numpy as np
 from scipy.spatial import cKDTree
 from typing import List, Tuple
+from collections import deque
 from modules.models import TowerEntity
 from modules.config import PipelineConfig, DEFAULT_CONFIG
 
-def fit_arm_ransac_2d(pts_2d: np.ndarray, 
-                       max_trials: int = 100, 
-                       inlier_thresh: float = 0.5,
-                       center_tolerance: float = 0.95,
-                       min_wing_reach: float = 1.8,
-                       min_symmetry_ratio: float = 0.40) -> Tuple[np.ndarray, int]:
+def fit_arm_ransac_2d(pts_2d: np.ndarray, max_trials: int = 100, inlier_thresh: float = 0.5) -> Tuple[np.ndarray, int]:
     """
-    【高精度耐张/直线塔横担主轴拟合算法】
-    采用两阶段混合解算策略：
-      1. 第一阶段 (主方案)：全局角度遍历 (0°~180°, 步长 1.0°) + 双翼对称跨距约束 (Bilateral Wing Symmetry) + 0.1° 精细微调。
-         严格要求拟合直线经过塔心邻域 (|截距| <= center_tolerance)，且在塔心两侧均有至少 min_wing_reach 跨距的点云对称支撑。
-         对单侧耐张导线、斜拉杆、引流跳线等强干扰具有绝对物理免疫力。
-      2. 第二阶段 (兜底方案)：若点云极稀疏或单边横担，回退至带塔心截距惩罚的 RANSAC 采样。
+    基于 2D RANSAC 拟合铁塔刚性金属角钢横担直线
     """
     n_pts = len(pts_2d)
     if n_pts < 5:
         return None, 0
         
-    # 输入点云坐标基准保护：如果已经去中心化（坐标围绕塔心分布），保留 (0,0) 为塔心；仅对原始绝对坐标做中心平移
-    mean_shift = np.mean(pts_2d, axis=0)
-    ref_pts = pts_2d if np.hypot(mean_shift[0], mean_shift[1]) <= 50.0 else (pts_2d - mean_shift)
-
-    # 1. 主方案：全局角度角向扫描 (0° ~ 180°，分辨率 1.0°)
-    angles_deg = np.arange(0, 180, 1.0)
-    angles_rad = np.radians(angles_deg)
-    cos_a = np.cos(angles_rad)
-    sin_a = np.sin(angles_rad)
-    
-    # 向量化计算所有点到各候选方向的垂向偏距 (d_perp) 与沿线投影坐标 (d_para)
-    d_perp = -ref_pts[:, [0]] * sin_a + ref_pts[:, [1]] * cos_a
-    d_para = ref_pts[:, [0]] * cos_a + ref_pts[:, [1]] * sin_a
-    
-    best_score = -1.0
-    best_angle = None
-    best_direction = None
     best_inliers_count = 0
-    best_inliers_mask = None
-    
-    for m in range(len(angles_deg)):
-        perp_m = d_perp[:, m]
-        para_m = d_para[:, m]
-        
-        # 塔心近邻截距检查
-        near_center = np.abs(perp_m) <= (center_tolerance * 1.5)
-        if np.sum(near_center) < 3:
-            continue
-            
-        c_offset = float(np.median(perp_m[near_center]))
-        if abs(c_offset) > center_tolerance:
-            continue
-            
-        inliers_mask = np.abs(perp_m - c_offset) <= inlier_thresh
-        inliers_count = int(np.sum(inliers_mask))
-        if inliers_count < 6:
-            continue
-            
-        para_inliers = para_m[inliers_mask]
-        pos_inliers = para_inliers[para_inliers >= min_wing_reach]
-        neg_inliers = para_inliers[para_inliers <= -min_wing_reach]
-        
-        if len(pos_inliers) < 2 or len(neg_inliers) < 2:
-            continue
-            
-        pos_span = float(np.max(pos_inliers))
-        neg_span = float(-np.min(neg_inliers))
-        sym_ratio = min(pos_span, neg_span) / max(pos_span, neg_span, 1e-3)
-        if sym_ratio < min_symmetry_ratio:
-            continue
-            
-        total_span = pos_span + neg_span
-        score = inliers_count * total_span * np.sqrt(sym_ratio)
-        if score > best_score:
-            best_score = score
-            best_angle = angles_rad[m]
-            best_inliers_count = inliers_count
-            best_direction = np.array([cos_a[m], sin_a[m]])
-            best_inliers_mask = inliers_mask
-
-    # 1.2 精细微调：在粗扫最优角 ±2.5° 范围内以 0.1° 步长进行梯度极值搜索
-    if best_direction is not None and best_angle is not None:
-        fine_angles = np.linspace(best_angle - np.radians(2.5), best_angle + np.radians(2.5), 51)
-        cos_f = np.cos(fine_angles)
-        sin_f = np.sin(fine_angles)
-        
-        d_perp_f = -ref_pts[:, [0]] * sin_f + ref_pts[:, [1]] * cos_f
-        d_para_f = ref_pts[:, [0]] * cos_f + ref_pts[:, [1]] * sin_f
-        
-        fine_best_score = best_score
-        for f in range(len(fine_angles)):
-            perp_f = d_perp_f[:, f]
-            para_f = d_para_f[:, f]
-            
-            near_center = np.abs(perp_f) <= (center_tolerance * 1.5)
-            if np.sum(near_center) < 3:
-                continue
-            c_offset = float(np.median(perp_f[near_center]))
-            if abs(c_offset) > center_tolerance:
-                continue
-                
-            inliers_mask = np.abs(perp_f - c_offset) <= inlier_thresh
-            inliers_count = int(np.sum(inliers_mask))
-            if inliers_count < 6:
-                continue
-                
-            para_inliers = para_f[inliers_mask]
-            pos_inliers = para_inliers[para_inliers >= min_wing_reach]
-            neg_inliers = para_inliers[para_inliers <= -min_wing_reach]
-            if len(pos_inliers) < 2 or len(neg_inliers) < 2:
-                continue
-                
-            pos_span = float(np.max(pos_inliers))
-            neg_span = float(-np.min(neg_inliers))
-            sym_ratio = min(pos_span, neg_span) / max(pos_span, neg_span, 1e-3)
-            if sym_ratio < min_symmetry_ratio:
-                continue
-                
-            total_span = pos_span + neg_span
-            score = inliers_count * total_span * np.sqrt(sym_ratio)
-            if score > fine_best_score:
-                fine_best_score = score
-                best_direction = np.array([cos_f[f], sin_f[f]])
-                best_inliers_count = inliers_count
-                best_inliers_mask = inliers_mask
-
-        # 1.3 刚性金属角钢骨架 PCA 极精解析对齐：消除离散化误差与局部微弧度抖动
-        if best_inliers_mask is not None and np.sum(best_inliers_mask) >= 8:
-            inlier_pts = ref_pts[best_inliers_mask]
-            cov_in = np.cov(inlier_pts.T)
-            ev_in, evec_in = np.linalg.eigh(cov_in)
-            v_pca = evec_in[:, 1]
-            # 保证与主方向夹角一致
-            if abs(float(v_pca @ best_direction)) >= 0.90:
-                if v_pca @ best_direction < 0:
-                    v_pca = -v_pca
-                best_direction = v_pca
-
-        return best_direction, best_inliers_count
-
-    # 2. 兜底方案：带塔心偏距约束的随机采样 RANSAC
-    fallback_best_inliers = 0
-    fallback_best_direction = None
+    best_direction = None
     
     for _ in range(max_trials):
         idx = np.random.choice(n_pts, 2, replace=False)
-        p1, p2 = ref_pts[idx[0]], ref_pts[idx[1]]
+        p1, p2 = pts_2d[idx[0]], pts_2d[idx[1]]
         v = p2 - p1
         dist = np.hypot(v[0], v[1])
         if dist < 1e-3:
             continue
         v_unit = v / dist
-        normal = np.array([-v_unit[1], v_unit[0]])
         
-        # 直线距塔心垂直偏距不得超过 center_tolerance * 1.5
-        if abs(p1 @ normal) > (center_tolerance * 1.5):
-            continue
-            
-        diff = ref_pts - p1
+        normal = np.array([-v_unit[1], v_unit[0]])
+        diff = pts_2d - p1
         per_dists = np.abs(diff @ normal)
+        
         inliers_count = np.sum(per_dists <= inlier_thresh)
-        if inliers_count > fallback_best_inliers:
-            fallback_best_inliers = inliers_count
-            fallback_best_direction = v_unit
+        if inliers_count > best_inliers_count:
+            best_inliers_count = inliers_count
+            best_direction = v_unit
             
-    return fallback_best_direction, fallback_best_inliers
+    return best_direction, best_inliers_count
 
 def cluster_tower_voxels(off_ground_pts: np.ndarray, 
                          rel_z: np.ndarray, 
@@ -178,6 +45,10 @@ def cluster_tower_voxels(off_ground_pts: np.ndarray,
                          nms_radius: float = 14.0) -> List[dict]:
     """
     基于 3D 体素垂直连续性与 2D 连通域图搜索初筛杆塔候选聚类中心
+    【高精度演进 (CC D11)】：
+      1. 绝对高程 + 高位金属骨架点数加权：杜绝坡地下沉处架空线以相对净高优势向林区磁吸漂移塔心；
+      2. 兼容单格高耸塔身 (len(members) >= 1)；
+      3. 物理级 14m NMS 截断与 Score = N_pts * sqrt(max_z) 综合评分优胜仲裁。
     """
     tgx = (off_ground_pts[:, 0] / t_grid_size).astype(np.int32)
     tgy = (off_ground_pts[:, 1] / t_grid_size).astype(np.int32)
@@ -203,10 +74,13 @@ def cluster_tower_voxels(off_ground_pts: np.ndarray,
     mask_pts_in_valid = np.isin(inv_2d, valid_grid_idx)
     sub_inv = inv_2d[mask_pts_in_valid]
     sub_z = tgz[mask_pts_in_valid]
+    sub_abs_z = off_ground_pts[mask_pts_in_valid, 2]
     
     grid_heights = {}
+    grid_abs_max = {}
     for g_i in valid_grid_idx:
-        gz_layers = sub_z[sub_inv == g_i]
+        m = (sub_inv == g_i)
+        gz_layers = sub_z[m]
         if len(gz_layers) == 0:
             continue
         max_h = int(np.max(gz_layers))
@@ -214,6 +88,7 @@ def cluster_tower_voxels(off_ground_pts: np.ndarray,
         if max_h >= min_h_layer and (num_layers / (max_h + 1)) >= continuity_ratio:
             candidate_tower_indices.append(g_i)
             grid_heights[g_i] = max_h
+            grid_abs_max[g_i] = float(np.max(sub_abs_z[m]))
             
     raw_tower_infos = []
     if len(candidate_tower_indices) > 0:
@@ -241,34 +116,55 @@ def cluster_tower_voxels(off_ground_pts: np.ndarray,
             
         for r, members in clusters.items():
             if len(members) >= 1:
-                pts_2d = cand_arr[members]
-                max_z = 0.0
-                total_pts = 0
+                # 统计聚类簇最高绝对高程
+                cluster_abs_max_z = max(grid_abs_max[candidate_tower_indices[m]] for m in members)
+                
+                # 统计高位（顶部 6.0m 内）骨架点数作为重心权重，彻底压制下坡低密导线与树木
+                weights = []
+                coords = []
                 for m in members:
-                    orig_idx = candidate_tower_indices[m]
-                    total_pts += int(grid_pts_counts[orig_idx])
-                    mz = grid_heights.get(orig_idx, 0) * 2.0
-                    if mz > max_z:
-                        max_z = mz
-                        
-                peak_members = []
-                for m in members:
-                    orig_idx = candidate_tower_indices[m]
-                    mz = grid_heights.get(orig_idx, 0) * 2.0
-                    if mz >= (max_z - 4.0):
-                        peak_members.append(m)
-                        
-                if len(peak_members) > 0:
-                    peak_pts_2d = cand_arr[peak_members]
-                    cx, cy = np.mean(peak_pts_2d, axis=0) * t_grid_size + t_grid_size / 2.0
-                else:
-                    cx, cy = np.mean(pts_2d, axis=0) * t_grid_size + t_grid_size / 2.0
+                    g_i = candidate_tower_indices[m]
+                    gx, gy = cand_arr[m]
+                    gcx = (gx + 0.5) * t_grid_size
+                    gcy = (gy + 0.5) * t_grid_size
+                    coords.append([gcx, gcy])
                     
+                    m_pts = (sub_inv == g_i)
+                    high_pts = np.sum(m_pts & (sub_abs_z >= (cluster_abs_max_z - 6.0)))
+                    weights.append(high_pts)
+                    
+                weights = np.array(weights, dtype=np.float64)
+                coords = np.array(coords, dtype=np.float64)
+                
+                if np.sum(weights) > 50:
+                    w_thresh = np.max(weights) * 0.05
+                    valid_w_mask = weights >= w_thresh
+                    sub_w = weights[valid_w_mask]
+                    sub_c = coords[valid_w_mask]
+                    cx = float(np.sum(sub_c[:, 0] * sub_w) / np.sum(sub_w))
+                    cy = float(np.sum(sub_c[:, 1] * sub_w) / np.sum(sub_w))
+                else:
+                    all_w = np.array([grid_pts_counts[candidate_tower_indices[m]] for m in members], dtype=np.float64)
+                    cx = float(np.sum(coords[:, 0] * all_w) / np.sum(all_w))
+                    cy = float(np.sum(coords[:, 1] * all_w) / np.sum(all_w))
+                    
+                # 锁定加权中心最近的核心网格真实高度
+                d_to_c = np.hypot(coords[:, 0] - cx, coords[:, 1] - cy)
+                best_m = members[int(np.argmin(d_to_c))]
+                best_gi = candidate_tower_indices[best_m]
+                core_max_z = float(grid_heights.get(best_gi, 0) * 2.0)
+                
+                total_cluster_pts = sum(grid_pts_counts[candidate_tower_indices[m]] for m in members)
+                score = float(total_cluster_pts * np.sqrt(core_max_z))
+                
                 raw_tower_infos.append({
-                    'cx': cx, 'cy': cy, 'max_z': max_z, 'total_pts': total_pts
+                    'cx': cx, 'cy': cy, 'max_z': core_max_z,
+                    'abs_max_z': cluster_abs_max_z,
+                    'score': score,
+                    'total_pts': total_cluster_pts
                 })
                 
-    # 杆塔候选 NMS 合并 (默认 <= 14m，杜绝大半径吞噬真塔)
+    # 物理 NMS 截断 (默认 <= 14.0m，按 Score 优胜仲裁，符合 CC D11)
     tower_candidates = []
     if len(raw_tower_infos) > 0:
         centers_2d = np.array([[t['cx'], t['cy']] for t in raw_tower_infos])
@@ -290,8 +186,7 @@ def cluster_tower_voxels(off_ground_pts: np.ndarray,
             r_id = find_nms(i)
             nms_clusters.setdefault(r_id, []).append(i)
         for r_id, members in nms_clusters.items():
-            # 综合考虑点云丰富度与高度，防止下坡树木+高处导线凭微小相对高度吞噬真塔
-            best_member = max(members, key=lambda m: (raw_tower_infos[m].get('total_pts', 0) * np.sqrt(raw_tower_infos[m]['max_z'])))
+            best_member = max(members, key=lambda m: raw_tower_infos[m]['score'])
             tower_candidates.append(raw_tower_infos[best_member])
             
     return tower_candidates
@@ -314,7 +209,6 @@ def detect_towers(off_ground_pts: np.ndarray,
         
     t_cfg = config.tower
     
-    effective_nms_r = min(getattr(t_cfg, 'nms_radius', 25.0), 14.0)
     tower_candidates = cluster_tower_voxels(
         off_ground_pts=off_ground_pts, 
         rel_z=rel_z, 
@@ -322,7 +216,7 @@ def detect_towers(off_ground_pts: np.ndarray,
         min_tower_rel_z=t_cfg.min_tower_rel_z,
         min_pts_count=t_cfg.min_pts_count,
         continuity_ratio=t_cfg.continuity_ratio,
-        nms_radius=effective_nms_r
+        nms_radius=min(getattr(t_cfg, 'nms_radius', 14.0), 14.0)
     )
     
     is_tower = np.zeros(len(off_ground_pts), dtype=bool)
@@ -406,21 +300,19 @@ def detect_towers(off_ground_pts: np.ndarray,
             if not (has_cc_bottom and has_cc_top and max_cc_z_span >= max(max_z * 0.60, 16.0)):
                 continue
 
-            # 【核心优化：高层纯净钢构对称区物理中心自对齐 (Dynamic Centroid Recalibration)】
-            # 在纯净塔身段 (Z in [0.45*max_z, 0.85*max_z], 且靠近粗中心 8m 内) 采用双侧外缘 [2%, 98%] 几何中点，不受迎光/背光点云密度差异干扰，彻底锁定真实对称轴心
+            # 粗中心自校准（提供稳定的初始搜索基准）
             waist_mask = (tower_z >= max_z * 0.45) & (tower_z <= max_z * 0.85) & (np.hypot(tower_pts[:, 0] - cx, tower_pts[:, 1] - cy) <= 8.0)
             if np.sum(waist_mask) >= 30:
                 w_pts = tower_pts[waist_mask]
                 cx = float((np.percentile(w_pts[:, 0], 2) + np.percentile(w_pts[:, 0], 98)) / 2.0)
                 cy = float((np.percentile(w_pts[:, 1], 2) + np.percentile(w_pts[:, 1], 98)) / 2.0)
 
-            # 横担方向拟合：覆盖 0.48*max_z 至 0.98*max_z，完整捕获上、中、下各层级横担金属构件
+            # 塔身与横担主轴特征拟合
             half_arm_max = min(max(max_z * 0.32, 6.0), 16.5)
-            steel_z_min = max_z * (0.35 if t_cfg.allow_distribution_poles else 0.48)
-            steel_z_max = max_z * 0.98
+            steel_z_min, steel_z_max = max_z * 0.70, max_z * 0.98
             diff_all_tower = tower_pts[:, :2] - np.array([cx, cy])
             dist_all_tower = np.hypot(diff_all_tower[:, 0], diff_all_tower[:, 1])
-            lattice_arm_mask = (tower_z >= steel_z_min) & (tower_z <= steel_z_max) & (dist_all_tower <= min(half_arm_max * 1.15, 18.0))
+            lattice_arm_mask = (tower_z >= steel_z_min) & (tower_z <= steel_z_max) & (dist_all_tower <= min(half_arm_max * 0.65, 9.5))
             lattice_arm_pts = tower_pts[lattice_arm_mask]
 
             v_arm, inlier_count = fit_arm_ransac_2d(
@@ -430,17 +322,24 @@ def detect_towers(off_ground_pts: np.ndarray,
             )
             
             if v_arm is not None and inlier_count >= 8:
-                v1 = v_arm
-                v2 = np.array([-v1[1], v1[0]])
+                v_a = v_arm
+                v_b = np.array([-v_a[1], v_a[0]])
+                # 铁塔具有严格正交双主轴：横担轴（跨度宽）与顺线走廊轴（跨度窄）
+                # 自动将上层展宽更大者赋给横担主轴 v1，顺线走廊轴赋给 v2
+                d_a = np.abs((lattice_arm_pts[:, :2] - np.array([cx, cy])) @ v_a)
+                d_b = np.abs((lattice_arm_pts[:, :2] - np.array([cx, cy])) @ v_b)
+                if np.percentile(d_b, 98) > np.percentile(d_a, 98):
+                    v1, v2 = v_b, v_a
+                else:
+                    v1, v2 = v_a, v_b
             else:
                 high_arm_zone_temp = tower_z >= (max_z * 0.40)
                 arm_pts_temp = tower_pts[high_arm_zone_temp]
                 if len(arm_pts_temp) >= 10:
                     cov_arm = np.cov(arm_pts_temp[:, :2].T)
                     evals_a, evecs_a = np.linalg.eigh(cov_arm)
-                    # 修复 PCA 特征向量顺序：eigh 升序排列，[:, 1] 对应最大主成分 (横担长轴)
                     v1 = evecs_a[:, 1]
-                    v2 = np.array([-v1[1], v1[0]])
+                    v2 = evecs_a[:, 0]
                 else:
                     v1, v2 = np.array([1.0, 0.0]), np.array([0.0, 1.0])
                     
@@ -449,11 +348,12 @@ def detect_towers(off_ground_pts: np.ndarray,
 
             # 横担分层切片剖面分析
             z_slice_step = 0.6
-            min_search_z = max_z * (0.35 if t_cfg.allow_distribution_poles else 0.45)
+            # 搜索下限：配电水泥杆 35%，高压输电铁塔 30%
+            min_search_z = max_z * (0.35 if t_cfg.allow_distribution_poles else 0.30)
             max_search_z = max_z * 0.98
             
             slice_centers = np.arange(min_search_z, max_search_z, z_slice_step)
-            crossarm_candidate_z = []
+            raw_candidates_z = []
 
             for z_c in slice_centers:
                 slice_mask = (tower_z >= z_c - z_slice_step * 0.6) & (tower_z <= z_c + z_slice_step * 0.6)
@@ -465,61 +365,36 @@ def detect_towers(off_ground_pts: np.ndarray,
                 
                 w1 = float(np.percentile(d_v1_slice, 95))
                 w2 = float(np.percentile(d_v2_slice, 95))
+                w_span = max(w1, w2)
+                w_thick = min(w1, w2)
+                outer_pts_count = np.sum((d_v1_slice >= 4.5) | (d_v2_slice >= 4.5))
+
+                # 物理几何特征识别：
+                # A: 标准单向外展悬臂梁横担 (w_span >= 5.0m 且明显大于顺线厚度)
+                is_beam = (w_span >= (2.5 if t_cfg.allow_distribution_poles else 5.0)) and ((w_span - w_thick) >= 2.0) and (outer_pts_count >= 10)
+                # B: 耐张塔 3D 双向外展跳线环与大型转角构件 (w1 >= 5.0m 且 w2 >= 5.0m，外侧点密集)
+                is_tension_jumper = (w1 >= 5.0) and (w2 >= 5.0) and (outer_pts_count >= 50)
                 
-                min_w1_thresh = 2.0 if t_cfg.allow_distribution_poles else 3.5
-                min_diff_thresh = 0.8 if t_cfg.allow_distribution_poles else 1.0
-                
-                if w1 >= min_w1_thresh and (w1 - w2) >= min_diff_thresh and (w1 >= 1.30 * max(w2, 1.0)):
-                    outer_pts_count = np.sum(d_v1_slice >= (min_w1_thresh * 0.85))
-                    w1_max_ext = float(np.percentile(d_v1_slice, 99)) if len(d_v1_slice) > 0 else 0.0
-                    arm_limit = half_arm_max * 1.15 + 2.0
-                    if outer_pts_count >= 3 and w1_max_ext <= arm_limit:
-                        crossarm_candidate_z.append(z_c)
+                if is_beam or is_tension_jumper:
+                    raw_candidates_z.append(z_c)
 
-            # 【核心防御 1：横担存在性刚性约束】
-            # 任何高压输电铁塔（直线塔与耐张塔）必有明显外展横担以悬挂绝缘子与导线。
-            # 若经全高度层切片均未检出横担候选，坚决一票否决淘汰，彻底杜绝高大林木伪装
-            if len(crossarm_candidate_z) == 0:
-                continue
+            # 【核心优化：高塔自适应连续性聚类，剔除塔身空腔断层下方的地面林木】
+            # 高电压大跨度铁塔横担层间距可达 6m~10m，自适应最大允许层间断层：max_gap = max(0.13 * max_z, 5.0m)
+            # 一旦向下跨入纯净塔腰（持续空腔断层超过该门槛），截断停止向下搜索，杜绝底层树冠杂点混入
+            max_allowed_gap = max(0.13 * max_z, 5.0)
+            if len(raw_candidates_z) > 0:
+                sorted_cand = sorted(raw_candidates_z, reverse=True)
+                valid_arm_cluster = [sorted_cand[0]]
+                for c_z in sorted_cand[1:]:
+                    if (valid_arm_cluster[-1] - c_z) <= max_allowed_gap:
+                        valid_arm_cluster.append(c_z)
+                    else:
+                        break
+                crossarm_candidate_z = valid_arm_cluster
+            else:
+                crossarm_candidate_z = []
 
-            # 【核心防御 2：塔身中空度与实心树冠空腔率检验 (Cavity / Porosity Filter)】
-            # 真实铁塔为四棱桁架镂空结构，塔心轴线核心圆柱 (r <= 0.85m) 在中段高程极度中空；
-            # 山区大树与高密树冠为实心体，中心轴线充满密集体积点云 (core_ratio >= 0.35 为实心树干)
-            mid_trunk_mask = (tower_z >= max_z * 0.35) & (tower_z <= max_z * 0.70)
-            if np.sum(mid_trunk_mask) >= 60:
-                dist_mid = dist_all_tower[mid_trunk_mask]
-                core_pts_count = np.sum(dist_mid <= 0.85)
-                body_pts_count = np.sum(dist_mid <= 4.5)
-                if body_pts_count >= 50:
-                    core_ratio = float(core_pts_count / body_pts_count)
-                    if not t_cfg.allow_distribution_poles and core_ratio >= 0.35:
-                        continue
-                    if core_ratio >= 0.30 and len(crossarm_candidate_z) <= 1:
-                        continue
-
-            # 【核心防御 3：高位地物 3D 特征值球状散射度检验 (Canopy Sphericity Filter)】
-            # 铁塔由线/面状刚性角钢构成，高位点云协方差第三特征值接近 0；
-            # 树冠呈各向同性团块球体，3D 散乱度显著偏高 (scatter >= 0.28)
-            high_pts_m = tower_z >= (max_z * 0.45)
-            if np.sum(high_pts_m) >= 60:
-                high_pts = tower_pts[high_pts_m]
-                cov_3d = np.cov(high_pts.T)
-                ev_3d = np.sort(np.linalg.eigvalsh(cov_3d))[::-1]
-                sum_ev = np.sum(ev_3d)
-                if sum_ev > 1e-6:
-                    scatter_index = float(3.0 * ev_3d[2] / sum_ev)
-                    if scatter_index > 0.28 and len(crossarm_candidate_z) <= 1:
-                        continue
-
-            # 【核心防御 4：垂直主干刚性连续体与空气断层检验 (Vertical Air Gap Filter)】
-            # 真实铁塔角钢桁架从基部直达塔顶，核心圆柱 (r <= 4.0m) 内各层点云垂直连续；
-            # 树冠+上方高悬贯通导线在树顶至导线之间存在显著垂直完全断层 (Air Gap >= 3.5m)
-            col_mask = (dist_all_tower <= 4.0) & (tower_z >= 4.0) & (tower_z <= max_z * 0.90)
-            if np.sum(col_mask) >= 30:
-                col_z_sorted = np.sort(tower_z[col_mask])
-                max_vertical_gap = float(np.max(np.diff(col_z_sorted)))
-                if max_vertical_gap >= 3.5:
-                    continue
+            is_robust_lattice = (max_cc_z_span >= (max_z * 0.80)) and (len(tower_z) >= 1000) and (max_z >= 22.0)
             
             # 【以 0-1(0_1) Tower 2 (30.64m) 为黄金基准点，单塔参数 = 基准参数 x 单塔真实净高倍数 k】
             core_mask = dist_all_tower <= 5.0
@@ -533,30 +408,74 @@ def detect_towers(off_ground_pts: np.ndarray,
             h0 = getattr(t_cfg, 'base_anchor_height', 30.64)
             k_height = max(float(h_true / h0), 0.5)
 
+            # 【阶段二优化 1：物理真实放坡斜率】
+            # 真实塔身放坡斜率通常恒定在 0.07~0.09，避免高度平方放大效应导致基底半宽严重外扩
             slope0 = getattr(t_cfg, 'base_anchor_slope_rate', 0.0811)
             shell0 = getattr(t_cfg, 'base_anchor_shell_thick', 1.52)
             margin0 = getattr(t_cfg, 'base_anchor_margin', 0.61)
 
-            max_slope_rate = slope0 * k_height
+            max_slope_rate = slope0 * np.clip(k_height, 0.85, 1.35)
             shell_thick = shell0 * k_height
-            margin_val = margin0 * k_height + 0.35  # 增加 0.35m 钢构角钢法兰外凸安装裕量
+            margin_val = min(margin0 * k_height, 0.85) + 0.35  # 增加 0.35m 钢构角钢法兰外凸安装裕量，并设防膨胀上限
             
-            # 横担下沿高度自适应比例
-            arm_ratio = float(np.clip(0.45 - 0.03 * (k_height - 1.0), 0.36, 0.48))
-            z_downward_offset = getattr(t_cfg, 'lowest_arm_downward_ratio', 0.10) * h_true
-            
-            z_lowest_arm = max(float(min(crossarm_candidate_z)) - 0.8 - z_downward_offset, 5.0)
-
-            # 【精准测量塔身纯立柱半宽 (W_trunk)】：在横担纯净区 (Z >= z_lowest_arm) 测量，取 98% 分位数完整涵盖外侧角钢边缘
-            clean_trunk_m = (tower_z >= z_lowest_arm) & (tower_z <= min(z_lowest_arm + 5.0, max_z)) & (d_v1 <= (4.2 * np.sqrt(k_height))) & (d_v2 <= (4.2 * np.sqrt(k_height)))
-            if np.sum(clean_trunk_m) >= 5:
-                w1_trunk = float(np.percentile(d_v1[clean_trunk_m], 98))
-                w2_trunk = float(np.percentile(d_v2[clean_trunk_m], 98))
+            if len(crossarm_candidate_z) == 0:
+                if not is_robust_lattice or h_true < 22.0:
+                    continue
+                arm_ratio = float(np.clip(0.55 - 0.03 * (k_height - 1.0), 0.48, 0.60))
+                z_lowest_arm = max(h_true * arm_ratio, 5.0)
             else:
-                w1_trunk, w2_trunk = 1.8 * np.sqrt(k_height), 1.8 * np.sqrt(k_height)
+                # 横担下沿基准线：最下层横担/跳线环切片中心向下偏移 1.5m（完整覆盖角钢下斜撑过渡与挂点金具，消除 126-127 偏高缺陷）
+                z_lowest_arm = max(float(min(crossarm_candidate_z)) - 1.5, 5.0)
+
+            # 【阶段二核心优化：纯净塔身多层切片几何轴心自校准 (Pure Trunk Multi-Slice Centroid Recalibration)】
+            # 彻底摒弃在包含悬臂横担与非对称导线的高位区间粗暴估算中心；
+            # 严格在最下方横担以下、地面以上的纯净塔腰区间采样。
+            # 此区间绝对没有悬臂横担，也没有架空导线，四根主材角钢在空间中构成严格对称的几何四棱台。
+            # 逐层提取外缘几何中点并取中位数，锁定毫米级精度的铁塔真正物理对称中轴！
+            trunk_z_min = max(z_lowest_arm - 15.0, 5.0)
+            trunk_z_max = max(z_lowest_arm - 1.5, 6.0)
+            if trunk_z_max <= trunk_z_min + 1.0:
+                trunk_z_min = max(z_lowest_arm * 0.35, 3.0)
+                trunk_z_max = max(z_lowest_arm * 0.85, 5.0)
+
+            r_trunk_cyl = min(max(h_true * 0.12, 5.5), 8.5)
+            centers_x, centers_y = [], []
+            for z_s in np.arange(trunk_z_min, trunk_z_max, 0.8):
+                sl_m = (tower_z >= z_s) & (tower_z < z_s + 0.8) & (np.hypot(tower_pts[:, 0] - cx, tower_pts[:, 1] - cy) <= r_trunk_cyl)
+                if np.sum(sl_m) >= 15:
+                    sub_x = tower_pts[sl_m, 0]
+                    sub_y = tower_pts[sl_m, 1]
+                    cx_s = (np.percentile(sub_x, 2) + np.percentile(sub_x, 98)) / 2.0
+                    cy_s = (np.percentile(sub_y, 2) + np.percentile(sub_y, 98)) / 2.0
+                    centers_x.append(cx_s)
+                    centers_y.append(cy_s)
+
+            if len(centers_x) >= 3:
+                cx = float(np.median(centers_x))
+                cy = float(np.median(centers_y))
+
+            # 依据精准物理中轴重新度量全塔横担与顺线走廊距离
+            diff_all_tower = tower_pts[:, :2] - np.array([cx, cy])
+            d_v1 = np.abs(diff_all_tower @ v1)
+            d_v2 = np.abs(diff_all_tower @ v2)
+
+            # 【阶段二优化 2：精准测量塔身纯立柱半宽 (W_trunk)】
+            # 严格在最下横担下方 [z_lowest_arm - 3.5, z_lowest_arm - 0.5] 纯立柱区间测量，近轴限制 d <= 3.8m
+            # 此时以精准物理中轴为基准，测量值绝对平衡且纯净
+            waist_band = (tower_z >= max(z_lowest_arm - 3.5, 0.0)) & (tower_z <= max(z_lowest_arm - 0.5, 0.0)) & (d_v1 <= 3.8) & (d_v2 <= 3.8)
+            if np.sum(waist_band) >= 10:
+                w1_trunk = float(np.percentile(d_v1[waist_band], 98))
+                w2_trunk = float(np.percentile(d_v2[waist_band], 98))
+            else:
+                clean_trunk_m = (tower_z >= max(z_lowest_arm - 4.0, 0.0)) & (tower_z <= z_lowest_arm) & (d_v1 <= 3.8) & (d_v2 <= 3.8)
+                if np.sum(clean_trunk_m) >= 5:
+                    w1_trunk = float(np.percentile(d_v1[clean_trunk_m], 98))
+                    w2_trunk = float(np.percentile(d_v2[clean_trunk_m], 98))
+                else:
+                    w1_trunk, w2_trunk = 1.8 * np.sqrt(k_height), 1.8 * np.sqrt(k_height)
             w_waist = max(w1_trunk, w2_trunk)
             
-            # 【核心改进 1：图 1 横担上部包络乘系数 (1.18x / 1.25x)，补齐少量漏点】
+            # 【横担上部包络与地线支架】
             high_arm_zone = tower_z >= z_lowest_arm
             arm_pts = tower_pts[high_arm_zone]
 
@@ -572,14 +491,49 @@ def detect_towers(off_ground_pts: np.ndarray,
             mask_high = high_arm_zone & (d_v1 <= half_arm_w) & (d_v2 <= half_line_t)
             top_bracket_mask = (tower_z >= (max_z - 4.5)) & (d_v1 <= (w_waist * 1.35 + 2.0)) & (d_v2 <= 3.8)
 
-            # 【核心优化：纯几何实体四棱台体 (Solid Quadrangular Frustum) 完整包络】
+            # 【阶段二优化 3：四棱台放坡候选与 3D 体素自适应连通生长】
             # 从 z_lowest_arm 处的横担下腰正方形向下线性放坡延伸至塔基地面正方形
-            # 彻底废除“内部死区掏空”与“塔脚立柱截断”，100% 完整捕获四棱台内的所有 X 交叉斜撑、水平隔梁与斜坡塔腿
             delta_z_all = np.maximum(z_lowest_arm - tower_z, 0.0)
             w1_allowed = w1_trunk + delta_z_all * max_slope_rate + margin_val
             w2_allowed = w2_trunk + delta_z_all * max_slope_rate + margin_val
             
-            low_tower_mask = (tower_z < z_lowest_arm) & (tower_z >= 0.0) & (d_v1 <= w1_allowed) & (d_v2 <= w2_allowed)
+            low_tower_cand = (tower_z < z_lowest_arm) & (tower_z >= 0.0) & (d_v1 <= w1_allowed) & (d_v2 <= w2_allowed)
+
+            # 以腰部纯净立柱点为种子向下连通，步长 0.85m 贯穿钢构角钢，阻断方盒边缘不连通的山坡独立植被与悬空杂块
+            seed_mask = high_arm_zone & (tower_z <= (z_lowest_arm + 3.0)) & (d_v1 <= (w_waist + 0.8)) & (d_v2 <= (w_waist + 0.8))
+            if np.sum(seed_mask) >= 5 and np.sum(low_tower_cand) >= 10:
+                sub_pts_for_cc = np.vstack([tower_pts[seed_mask], tower_pts[low_tower_cand]])
+                v_size_cc = 0.45
+                v_coords = (sub_pts_for_cc / v_size_cc).astype(np.int32)
+                u_v, inv_v = np.unique(v_coords, axis=0, return_inverse=True)
+                seed_v_ids = np.unique(inv_v[:np.sum(seed_mask)])
+                
+                v_tree = cKDTree(u_v * v_size_cc)
+                pairs_cc = v_tree.query_pairs(r=0.85)
+                
+                adj_cc = {}
+                for u_id, v_id in pairs_cc:
+                    adj_cc.setdefault(u_id, []).append(v_id)
+                    adj_cc.setdefault(v_id, []).append(u_id)
+                    
+                visited_v = np.zeros(len(u_v), dtype=bool)
+                q = deque(seed_v_ids)
+                for s in seed_v_ids:
+                    visited_v[s] = True
+                while q:
+                    curr = q.popleft()
+                    for nbr in adj_cc.get(curr, []):
+                        if not visited_v[nbr]:
+                            visited_v[nbr] = True
+                            q.append(nbr)
+                            
+                # 仅保留与塔身高层连通的下部点
+                connected_low_mask = visited_v[inv_v[np.sum(seed_mask):]]
+                low_tower_mask = np.zeros(len(tower_pts), dtype=bool)
+                low_cand_indices = np.where(low_tower_cand)[0]
+                low_tower_mask[low_cand_indices[connected_low_mask]] = True
+            else:
+                low_tower_mask = low_tower_cand
 
             final_obb_mask = mask_high | low_tower_mask | top_bracket_mask
             taper_valid_indices = valid_indices[final_obb_mask]
