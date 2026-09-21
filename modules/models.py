@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List, Set, Callable, Optional, Any, Iterator
+from typing import List, Set, Callable, Optional, Any, Iterator, Dict
 import numpy as np
 
 @dataclass
@@ -131,3 +131,50 @@ class ExtractionResult:
             self.find_line_func,
             self.insulator_pts_idx
         )[index]
+
+@dataclass
+class PipelineResult:
+    """
+    点云分类流水线整体执行成果对象 (Domain Result Container)
+    """
+    num_points: int
+    classification: np.ndarray
+    towers: List[TowerEntity] = field(default_factory=list)
+    wires: List[WireCluster] = field(default_factory=list)
+    stage_timings: Dict[str, float] = field(default_factory=dict)
+    ground_result: Optional[GroundResult] = None
+    extraction_result: Optional[ExtractionResult] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def ground_indices(self) -> np.ndarray:
+        return np.where(self.classification == 2)[0]
+
+    @property
+    def tower_indices(self) -> np.ndarray:
+        return np.where(self.classification == 15)[0]
+
+    @property
+    def wire_indices(self) -> np.ndarray:
+        return np.where((self.classification == 14) | (self.classification == 13))[0]
+
+    @property
+    def unclassified_indices(self) -> np.ndarray:
+        return np.where(self.classification == 1)[0]
+
+    @property
+    def total_time(self) -> float:
+        return float(sum(self.stage_timings.values()))
+
+    def summary(self) -> dict:
+        return {
+            'total_points': self.num_points,
+            'ground_count': int(len(self.ground_indices)),
+            'tower_count': int(len(self.tower_indices)),
+            'wire_count': int(len(self.wire_indices)),
+            'unclassified_count': int(len(self.unclassified_indices)),
+            'towers_detected': len(self.towers),
+            'wires_detected': len(self.wires),
+            'total_time_s': round(self.total_time, 2),
+            'stage_timings': {k: round(v, 3) for k, v in self.stage_timings.items()}
+        }

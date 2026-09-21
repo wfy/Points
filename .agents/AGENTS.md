@@ -218,3 +218,18 @@
 6. **google-workspace-cli**: Google Workspace 自动化工具与角色技能组（如 `gws-gmail`, `gws-docs`, `gws-sheets`, `gws-drive` 等）。
 7. **mcp-toolbox-for-databases**: 多数据源交互与维护技能组。
 
+---
+
+## 四、 工程技能配置 (Agent skills)
+
+### Issue tracker
+
+GitHub issues via `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Canonical 5-role triage vocabulary. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context (`CONTEXT.md` + `docs/adr/`). See `docs/agents/domain.md`.

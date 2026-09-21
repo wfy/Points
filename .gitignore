@@ -3,5 +3,5 @@
 /.git/*
 /__pycache__/*
 /modules/__pycache__/*
-/tests/*
+/tests/__pycache__/*
 /venv_312/*

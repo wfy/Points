@@ -7,19 +7,16 @@ from typing import List, Optional
 import numpy as np
 import laspy
 
-from modules.config import PipelineConfig, DEFAULT_CONFIG
-from modules.ground_separator import separate_ground
-from modules.tower_detector import detect_towers
-from modules.powerline_extractor import extract_and_track_powerlines
-from modules.topology_validator import validate_tower_topology
+from modules.config import PipelineConfig, DEFAULT_CONFIG, PipelineStage
+from modules.pipeline_executor import PipelineExecutor
 from modules.corridor_cutter import cut_corridors_by_spans, export_split_spans, split_raw_corridor
-from modules.utils import select_file_gui, open_in_qtmodeler, export_colored_las
+from modules.utils import select_file_gui, open_in_qtmodeler
 
 def fast_classify_and_color_powerline(las_input_path: str, 
                                       las_output_path: str, 
                                       config: PipelineConfig = None) -> str:
     """
-    点云电力线分类与着色主入口管道 (经典4阶段高保真调度，支持单档或整段数据)
+    点云电力线分类与着色主入口管道 (委托给深度模块 PipelineExecutor)
     
     Parameters:
     -----------
@@ -41,125 +38,23 @@ def fast_classify_and_color_powerline(las_input_path: str,
     print(f"[Start] 开始电力线分类处理: {las_input_path}")
     start_time = time.time()
     
-    # 0. 读取 LAS 点云文件
-    las = laspy.read(las_input_path)
-    points = np.column_stack([np.array(las.x), np.array(las.y), np.array(las.z)])
-    num_points = len(points)
-    print(f"   读取点云总数: {num_points:,} 点")
+    executor = PipelineExecutor(config=config)
+    result = executor.run_file(las_input_path, las_output_path, config=config)
+    actual_out_path = result.metadata.get("actual_output_path", las_output_path)
     
-    # 1. 阶段一：高适应性地面物理建模与剥离 (Ground Separation)
-    t1 = time.time()
-    print("-> 1/4 执行地形自适应局部滤波剥离地面...")
-    is_ground, ground_idx, off_ground_idx, off_ground_pts, rel_z = separate_ground(
-        points, 
-        grid_size=config.ground.grid_size, 
-        height_threshold=config.ground.height_threshold,
-        opening_radius=config.ground.opening_radius,
-        idw_k=config.ground.idw_k,
-        batch_size=config.ground.idw_batch_size
-    )
-    import gc
-    
-    # 2. 阶段二：3D 体素垂直连续性 + 2D 连通域聚类锁定铁塔 (Tower Detection & Filtering)
-    t2 = time.time()
-    print("-> 2/4 执行 3D 体素垂直连续性 + 聚类滤波锁定铁塔...")
-    is_tower, is_tower_arm, is_near_tower_high_arm, tower_infos = detect_towers(
-        off_ground_pts=off_ground_pts, 
-        rel_z=rel_z, 
-        off_ground_idx=off_ground_idx, 
-        t_grid_size=config.tower.t_grid_size,
-        config=config
-    )
-    print(f"   阶段二完成 (耗时: {time.time() - t2:.2f}s) | 检测到候选铁塔: {len(tower_infos)} 座")
-
-    # 阶段二着色参考：收集已检测铁塔中“最下方横担以下”的点（仅用于后段标黄，不改检测/分类）
-    tower_below_arm_pts_idx = np.array([], dtype=int)
-    if len(tower_infos) > 0:
-        _parts = []
-        for _info in tower_infos:
-            _local = _info.get('pts_idx', np.array([], dtype=int))
-            if len(_local) == 0:
-                continue
-            _z_low = float(_info.get('z_lowest_arm', 10.0))
-            _below = _local[rel_z[_local] < _z_low]
-            if len(_below) > 0:
-                _parts.append(off_ground_idx[_below])
-        if _parts:
-            tower_below_arm_pts_idx = np.unique(np.concatenate(_parts))
-
-    # 3. 阶段三：PCA 特征姿态分析 + 连续 3D 悬链线物理轨道追踪缝合 (【按需临时注释 M3 导线识别】)
-    # t3 = time.time()
-    # print("-> 3/4 执行 PCA 特征姿态分析与 3D 悬链线完整连续追踪...")
-    # ext_res = extract_and_track_powerlines(
-    #     points=points,
-    #     off_ground_pts=off_ground_pts,
-    #     off_ground_idx=off_ground_idx,
-    #     rel_z=rel_z,
-    #     is_tower=is_tower,
-    #     is_near_tower_high_arm=is_near_tower_high_arm,
-    #     tower_infos=tower_infos,
-    #     is_tower_arm=is_tower_arm,
-    #     config=config
-    # )
-    # cable_pts_idx = ext_res.cable_pts_idx
-    # point_line_id = ext_res.point_line_id
-    # all_confirmed = ext_res.all_confirmed
-    # suspect_line_ids = ext_res.suspect_line_ids
-    # find_line_func = ext_res.find_line_func
-    # print(f"   阶段三完成 (耗时: {time.time() - t3:.2f}s) | 提取导线点: {len(cable_pts_idx):,} 点 | 聚合线路簇: {len(all_confirmed)} 组")
-    cable_pts_idx = np.array([], dtype=int)
-    point_line_id = np.zeros(num_points, dtype=int)
-    all_confirmed = []
-    suspect_line_ids = set()
-    find_line_func = lambda x: x
-    print("-> 3/4 [已注释 M3 导线识别阶段]")
-
-    # 4. 阶段四：导线依附拓扑校验 (导线识别注释时，直接保留检测到的杆塔点)
-    # tower_pts_idx, valid_tower_count, demoted_pts_idx = validate_tower_topology(
-    #     points=points,
-    #     off_ground_idx=off_ground_idx,
-    #     rel_z=rel_z,
-    #     tower_infos=tower_infos,
-    #     cable_pts_idx=cable_pts_idx,
-    #     config=config
-    # )
-    tower_pts_idx = off_ground_idx[is_tower] if np.any(is_tower) else np.array([], dtype=int)
-    valid_tower_count = len(tower_infos)
-    print(f"-> 4/4 杆塔检测确认: 检测到 {valid_tower_count} 座杆塔 (杆塔点数: {len(tower_pts_idx):,})")
-    tower_arm_pts_idx = off_ground_idx[is_tower_arm & is_tower] if np.any(is_tower_arm & is_tower) else np.array([], dtype=int)
-
-    # 仅对拓扑校验通过的铁塔点标黄：最下方横担以下区域（不改分类）
-    if len(tower_below_arm_pts_idx) > 0:
-        tower_below_arm_pts_idx = np.intersect1d(tower_below_arm_pts_idx, tower_pts_idx)
-
-    # 5. 组装色彩与分类属性，导出成果 LAS 文件
-    actual_out_path = export_colored_las(
-        las_input_path=las_input_path,
-        las_output_path=las_output_path,
-        las_raw_data=las,
-        ground_idx=ground_idx,
-        cable_pts_idx=cable_pts_idx,
-        tower_pts_idx=tower_pts_idx,
-        tower_arm_pts_idx=tower_arm_pts_idx,
-        all_confirmed=all_confirmed,
-        point_line_id=point_line_id,
-        suspect_line_ids=suspect_line_ids,
-        find_line_func=find_line_func,
-        force_kill_viewer=config.export.force_kill_viewer,
-        tower_below_arm_pts_idx=tower_below_arm_pts_idx
-    )
-    
-    veg_count = num_points - len(ground_idx) - len(tower_pts_idx) - len(cable_pts_idx)
     total_cost = time.time() - start_time
+    summary = result.summary()
     print(f"[Done] 全流程处理完成！总耗时: {total_cost:.2f} 秒")
-    print(f"   分类统计: 地面={len(ground_idx):,} | 杆塔={len(tower_pts_idx):,} | 导线={len(cable_pts_idx):,} | 植被/杂波={veg_count:,}")
+    print(f"   分类统计: 地面={summary['ground_count']:,} | 杆塔={summary['tower_count']:,} | 导线={summary['wire_count']:,} | 植被/杂波={summary['unclassified_count']:,}")
     
-    # 6. 后置切分 (仅在整段模式下指定 --split-spans 时触发)
-    if config.corridor.split_spans and len(tower_infos) >= 2:
+    # 后置切分 (仅在整段模式下指定 --split-spans 时触发)
+    if config.corridor.split_spans and len(result.towers) >= 2:
         t_split = time.time()
+        las = laspy.read(las_input_path)
+        points = np.column_stack([np.array(las.x), np.array(las.y), np.array(las.z)])
         spans = cut_corridors_by_spans(
             points=points,
-            tower_infos=tower_infos,
+            tower_infos=result.towers,
             corridor_half_width=config.corridor.corridor_half_width,
             buffer_length=config.corridor.buffer_length
         )
@@ -263,6 +158,9 @@ if __name__ == "__main__":
     parser.add_argument("--force-kill-viewer", action="store_true", help="强制关闭后台运行的 QTModeler 线程")
     parser.add_argument("--distribution", action="store_true", help="启用配电网模式 (支持 10kV~110kV 矮塔/单双水泥杆)")
     
+    parser.add_argument("--stop-after", type=str, choices=["ground", "tower", "wire"], default=None,
+                        help="仅执行至指定阶段并提前终止 (可选: ground, tower, wire)")
+    
     # 走廊切片与批量模式参数
     parser.add_argument("--split-only", action="store_true", help="【步骤一】：仅执行纯走廊切片预处理，快速生成原始单档点云")
     parser.add_argument("--split-spans", action="store_true", help="分类完成后在后台自动切分各档独立成果 LAS")
@@ -274,6 +172,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     cfg = PipelineConfig()
+    if args.stop_after:
+        cfg.pipeline.stop_after = PipelineStage.from_string(args.stop_after)
     cfg.export.force_kill_viewer = args.force_kill_viewer
     cfg.export.open_qtmodeler = not args.no_qtmodeler
     cfg.corridor.split_spans = args.split_spans

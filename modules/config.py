@@ -1,5 +1,24 @@
 from dataclasses import dataclass, field
-from enum import IntEnum
+from enum import Enum, IntEnum
+from typing import Optional, Set
+
+class PipelineStage(str, Enum):
+    """
+    点云分类流水线执行生命周期阶段枚举
+    """
+    GROUND = "ground"
+    TOWER = "tower"
+    WIRE = "wire"
+    TOPOLOGY = "topology"
+    EXPORT = "export"
+
+    @classmethod
+    def from_string(cls, val: str) -> "PipelineStage":
+        clean = val.strip().lower()
+        for member in cls:
+            if member.value == clean or member.name.lower() == clean:
+                return member
+        raise ValueError(f"Unknown PipelineStage: '{val}'")
 
 class ClassificationCode(IntEnum):
     """
@@ -101,7 +120,13 @@ class ExportConfig:
     open_qtmodeler: bool = True
 
 @dataclass
+class PipelineExecutionConfig:
+    stop_after: Optional[PipelineStage] = None
+    stages: Optional[Set[PipelineStage]] = None
+
+@dataclass
 class PipelineConfig:
+    pipeline: PipelineExecutionConfig = field(default_factory=PipelineExecutionConfig)
     ground: GroundConfig = field(default_factory=GroundConfig)
     tower: TowerConfig = field(default_factory=TowerConfig)
     powerline: PowerlineConfig = field(default_factory=PowerlineConfig)
