@@ -123,6 +123,7 @@ class ExportConfig:
 class PipelineExecutionConfig:
     stop_after: Optional[PipelineStage] = None
     stages: Optional[Set[PipelineStage]] = None
+    verbose: bool = True  # 是否输出阶段执行日志与统计信息
 
 @dataclass
 class PipelineConfig:

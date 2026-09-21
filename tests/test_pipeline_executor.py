@@ -104,6 +104,46 @@ class TestPipelineExecutor(unittest.TestCase):
         self.assertEqual(len(t_set.intersection(w_set)), 0)
         self.assertEqual(len(g_set.intersection(w_set)), 0)
 
+    def test_short_circuit_wire(self):
+        cfg = PipelineConfig()
+        cfg.pipeline.stop_after = PipelineStage.WIRE
+        
+        executor = PipelineExecutor(config=cfg)
+        res = executor.run(self.synthetic_points, verbose=False)
+        
+        self.assertIsInstance(res, PipelineResult)
+        self.assertTrue(len(res.ground_indices) > 0)
+        self.assertTrue(len(res.tower_indices) > 0)
+        self.assertTrue(len(res.wire_indices) > 0)
+        self.assertIn("ground", res.stage_timings)
+        self.assertIn("tower", res.stage_timings)
+        self.assertIn("wire", res.stage_timings)
+        self.assertNotIn("topology", res.stage_timings)
+
+    def test_verbose_logging(self):
+        import io
+        from contextlib import redirect_stdout
+        
+        cfg = PipelineConfig()
+        cfg.pipeline.stop_after = PipelineStage.GROUND
+        
+        executor = PipelineExecutor(config=cfg)
+        
+        # Test verbose=True
+        buf_verbose = io.StringIO()
+        with redirect_stdout(buf_verbose):
+            executor.run(self.synthetic_points, verbose=True)
+        out_verbose = buf_verbose.getvalue()
+        self.assertIn("-> 1/4 执行地形自适应局部滤波剥离地面...", out_verbose)
+        self.assertIn("阶段一完成", out_verbose)
+        
+        # Test verbose=False
+        buf_silent = io.StringIO()
+        with redirect_stdout(buf_silent):
+            executor.run(self.synthetic_points, verbose=False)
+        out_silent = buf_silent.getvalue()
+        self.assertEqual(out_silent.strip(), "")
+
     def test_run_file_and_export(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             in_las = os.path.join(tmp_dir, "input.las")

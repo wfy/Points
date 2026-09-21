@@ -160,6 +160,7 @@ if __name__ == "__main__":
     
     parser.add_argument("--stop-after", type=str, choices=["ground", "tower", "wire"], default=None,
                         help="仅执行至指定阶段并提前终止 (可选: ground, tower, wire)")
+    parser.add_argument("--quiet", "-q", action="store_true", help="静默模式，不输出阶段详细执行日志")
     
     # 走廊切片与批量模式参数
     parser.add_argument("--split-only", action="store_true", help="【步骤一】：仅执行纯走廊切片预处理，快速生成原始单档点云")
@@ -174,6 +175,8 @@ if __name__ == "__main__":
     cfg = PipelineConfig()
     if args.stop_after:
         cfg.pipeline.stop_after = PipelineStage.from_string(args.stop_after)
+    if args.quiet:
+        cfg.pipeline.verbose = False
     cfg.export.force_kill_viewer = args.force_kill_viewer
     cfg.export.open_qtmodeler = not args.no_qtmodeler
     cfg.corridor.split_spans = args.split_spans
