@@ -48,6 +48,18 @@ class TestCorridorCutter(unittest.TestCase):
         self.assertEqual(CorridorCutter.order_towers([]), [])
         single = [TowerEntity(cx=10.0, cy=20.0, max_z=30.0)]
         self.assertEqual(CorridorCutter.order_towers(single), [0])
+        two = [TowerEntity(cx=10.0, cy=20.0, max_z=30.0), TowerEntity(cx=50.0, cy=60.0, max_z=30.0)]
+        self.assertEqual(CorridorCutter.order_towers(two), [0, 1])
+
+        # Coincident / near-zero delta towers must not trigger division by zero or NaN
+        coincident = [
+            TowerEntity(cx=0.0, cy=0.0, max_z=30.0),
+            TowerEntity(cx=50.0, cy=0.0, max_z=30.0),
+            TowerEntity(cx=50.0000001, cy=0.0, max_z=30.0),
+            TowerEntity(cx=100.0, cy=0.0, max_z=30.0),
+        ]
+        ordered = CorridorCutter.order_towers(coincident)
+        self.assertEqual(len(ordered), 4)
 
     def test_cut_spans_obb(self):
         # 2 towers: (0, 0) and (100, 0)
@@ -123,7 +135,20 @@ class TestCorridorCutter(unittest.TestCase):
         spans = cut_corridors_by_spans(points, towers)
         self.assertEqual(len(spans), 1)
 
-    @patch("modules.pipeline_executor.PipelineExecutor.run")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dummy_las = os.path.join(tmpdir, "test_sign.las")
+            header = laspy.LasHeader(point_format=3, version="1.2")
+            las = laspy.LasData(header)
+            las.x = np.array([50.0])
+            las.y = np.array([0.0])
+            las.z = np.array([10.0])
+            las.write(dummy_las)
+
+            paths = export_split_spans(dummy_las, spans)
+            self.assertEqual(len(paths), 1)
+            self.assertTrue(os.path.exists(paths[0]))
+
+    @patch("modules.pipeline_executor.PipelineExecutor.run", autospec=True)
     def test_split_raw_corridor_delegation(self, mock_executor_run):
         from unittest.mock import MagicMock
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -147,6 +172,42 @@ class TestCorridorCutter(unittest.TestCase):
             self.assertEqual(len(paths), 1)
             self.assertTrue(os.path.exists(paths[0]))
             mock_executor_run.assert_called_once()
+
+    def test_pipeline_executor_short_circuit_with_spans(self):
+        from modules.config import PipelineConfig, PipelineStage
+        from modules.pipeline_executor import PipelineExecutor
+        cfg = PipelineConfig()
+        cfg.corridor.split_spans = True
+        executor = PipelineExecutor(config=cfg)
+
+        points = np.array([
+            [0.0, 0.0, 10.0],
+            [50.0, 0.0, 10.0],
+            [100.0, 0.0, 10.0]
+        ])
+
+        with patch("modules.pipeline_executor.detect_towers") as mock_dt, \
+             patch("modules.pipeline_executor.separate_ground") as mock_sg:
+            mock_dt.return_value = (
+                np.zeros(3, dtype=bool),
+                np.zeros(3, dtype=bool),
+                np.zeros(3, dtype=bool),
+                [
+                    TowerEntity(cx=0.0, cy=0.0, max_z=30.0),
+                    TowerEntity(cx=100.0, cy=0.0, max_z=30.0)
+                ]
+            )
+            mock_sg.return_value = (
+                np.zeros(3, dtype=bool),
+                np.array([0]),
+                np.array([1, 2]),
+                np.array([[50.0, 0.0, 10.0], [100.0, 0.0, 10.0]]),
+                np.array([1.0, 1.0])
+            )
+            res = executor.run(points, config=cfg, stop_after=PipelineStage.TOWER)
+            self.assertIsNotNone(res.spans)
+            self.assertEqual(len(res.spans), 1)
+            self.assertEqual(res.spans[0].span_index, 0)
 
     def test_pipeline_executor_in_memory_split_spans(self):
         from modules.config import PipelineConfig

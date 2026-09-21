@@ -15,7 +15,8 @@ from modules.models import (
     TowerEntity,
     WireCluster,
     ExtractionResult,
-    PipelineResult
+    PipelineResult,
+    SpanSegment
 )
 from modules.ground_separator import separate_ground
 from modules.tower_detector import detect_towers
@@ -38,7 +39,8 @@ class PipelineExecutor:
     def run(self, 
             points: np.ndarray, 
             config: Optional[PipelineConfig] = None,
-            verbose: Optional[bool] = None) -> PipelineResult:
+            verbose: Optional[bool] = None,
+            stop_after: Optional[PipelineStage] = None) -> PipelineResult:
         """
         核心纯内存接缝：对空间点云坐标矩阵执行完整的电力线与杆塔提取流水线
         
@@ -50,6 +52,8 @@ class PipelineExecutor:
             本次调度的参数配置，默认使用类初始化时的配置
         verbose : Optional[bool]
             是否输出各阶段执行日志，默认遵循 config.pipeline.verbose
+        stop_after : Optional[PipelineStage]
+            可选的执行提前终止阶段，若指定则覆盖 config.pipeline.stop_after
             
         Returns:
         --------
@@ -58,7 +62,7 @@ class PipelineExecutor:
         """
         cfg = config if config is not None else self.config
         is_verbose = verbose if verbose is not None else getattr(cfg.pipeline, 'verbose', True)
-        stop_after = cfg.pipeline.stop_after
+        effective_stop_after = stop_after if stop_after is not None else cfg.pipeline.stop_after
         num_points = len(points)
         stage_timings: Dict[str, float] = {}
         
@@ -95,7 +99,7 @@ class PipelineExecutor:
             classification[ground_idx] = int(ClassificationCode.GROUND)
             
         # 短路检查：仅执行地面剥离
-        if stop_after == PipelineStage.GROUND:
+        if effective_stop_after == PipelineStage.GROUND:
             if is_verbose:
                 print("   [提前终止] 已根据配置 stop_after=ground 终止后续阶段")
             return PipelineResult(
@@ -144,10 +148,23 @@ class PipelineExecutor:
             if _parts:
                 tower_below_arm_pts_idx = np.unique(np.concatenate(_parts))
                 
+        # 走廊分档切片辅助闭包
+        def _maybe_cut_spans() -> Optional[List[SpanSegment]]:
+            if getattr(cfg.corridor, 'split_spans', False) and len(tower_infos) >= 2:
+                from modules.corridor_cutter import CorridorCutter
+                return CorridorCutter.cut_spans(
+                    points=points,
+                    tower_infos=tower_infos,
+                    corridor_half_width=cfg.corridor.corridor_half_width,
+                    buffer_length=cfg.corridor.buffer_length
+                )
+            return None
+
         # 短路检查：仅执行至杆塔检测
-        if stop_after == PipelineStage.TOWER:
+        if effective_stop_after == PipelineStage.TOWER:
             if is_verbose:
                 print("   [提前终止] 已根据配置 stop_after=tower 终止后续阶段")
+            spans = _maybe_cut_spans()
             return PipelineResult(
                 num_points=num_points,
                 classification=classification,
@@ -155,6 +172,7 @@ class PipelineExecutor:
                 wires=[],
                 stage_timings=stage_timings,
                 ground_result=ground_res,
+                spans=spans,
                 metadata={'tower_below_arm_pts_idx': tower_below_arm_pts_idx}
             )
 
@@ -189,7 +207,7 @@ class PipelineExecutor:
             print(f"   阶段三完成 (耗时: {stage_timings['wire']:.2f}s) | 提取导线点: {len(cable_pts_idx):,} 点 | 聚合线路簇: {len(all_confirmed)} 组")
 
         # 短路检查：仅执行至导线提取
-        if stop_after == PipelineStage.WIRE:
+        if effective_stop_after == PipelineStage.WIRE:
             if is_verbose:
                 print("   [提前终止] 已根据配置 stop_after=wire 终止后续阶段")
             if len(tower_pts_idx) > 0 and len(cable_pts_idx) > 0:
@@ -204,6 +222,7 @@ class PipelineExecutor:
             if len(tower_below_arm_pts_idx) > 0:
                 tower_below_arm_pts_idx = np.intersect1d(tower_below_arm_pts_idx, tower_pts_idx)
             tower_arm_pts_idx = off_ground_idx[is_tower_arm & is_tower] if (is_tower_arm is not None and np.any(is_tower_arm & is_tower)) else np.array([], dtype=int)
+            spans = _maybe_cut_spans()
             return PipelineResult(
                 num_points=num_points,
                 classification=classification,
@@ -212,6 +231,7 @@ class PipelineExecutor:
                 stage_timings=stage_timings,
                 ground_result=ground_res,
                 extraction_result=ext_res,
+                spans=spans,
                 metadata={
                     'point_line_id': point_line_id,
                     'suspect_line_ids': suspect_line_ids,
@@ -266,15 +286,7 @@ class PipelineExecutor:
         tower_arm_pts_idx = off_ground_idx[is_tower_arm & is_tower] if (is_tower_arm is not None and np.any(is_tower_arm & is_tower)) else np.array([], dtype=int)
 
         # 3. 走廊分档内存切片 (当配置开启且检测到至少 2 座杆塔时)
-        spans = None
-        if getattr(cfg.corridor, 'split_spans', False) and len(tower_infos) >= 2:
-            from modules.corridor_cutter import CorridorCutter
-            spans = CorridorCutter.cut_spans(
-                points=points,
-                tower_infos=tower_infos,
-                corridor_half_width=cfg.corridor.corridor_half_width,
-                buffer_length=cfg.corridor.buffer_length
-            )
+        spans = _maybe_cut_spans()
 
         return PipelineResult(
             num_points=num_points,
@@ -298,7 +310,8 @@ class PipelineExecutor:
                  las_input_path: str, 
                  las_output_path: str, 
                  config: Optional[PipelineConfig] = None,
-                 verbose: Optional[bool] = None) -> PipelineResult:
+                 verbose: Optional[bool] = None,
+                 stop_after: Optional[PipelineStage] = None) -> PipelineResult:
         """
         文件级执行门面：读取 LAS/LAZ 点云，调用内存核心计算并导出标准分类着色 LAS
         
@@ -312,6 +325,8 @@ class PipelineExecutor:
             运行时配置
         verbose : Optional[bool]
             是否输出各阶段执行日志，默认遵循 config.pipeline.verbose
+        stop_after : Optional[PipelineStage]
+            可选的执行提前终止阶段，若指定则覆盖 config.pipeline.stop_after
             
         Returns:
         --------
@@ -329,7 +344,7 @@ class PipelineExecutor:
             print(f"   读取点云总数: {num_points:,} 点")
         
         # 2. 执行内存核心流水线
-        result = self.run(points, config=cfg, verbose=is_verbose)
+        result = self.run(points, config=cfg, verbose=is_verbose, stop_after=stop_after)
         
         # 3. 如果需要落盘成果文件
         if cfg.export.force_kill_viewer:
@@ -364,10 +379,12 @@ class PipelineExecutor:
 
         # 4. 如果包含切档成果，导出独立单档 LAS 文件
         if result.spans is not None and len(result.spans) > 0:
+            t_split_start = time.time()
             from modules.corridor_cutter import CorridorCutter
             split_paths = CorridorCutter.export_spans(actual_path, result.spans)
+            result.stage_timings["span_export"] = float(time.time() - t_split_start)
             result.metadata["split_span_paths"] = split_paths
             if is_verbose:
-                print(f"   两塔一档切分完成 | 生成独立档段 LAS 文件: {len(split_paths)} 份")
+                print(f"   两塔一档切分完成 (耗时: {result.stage_timings['span_export']:.2f}s) | 生成独立档段 LAS 文件: {len(split_paths)} 份")
 
         return result

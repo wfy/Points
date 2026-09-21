@@ -29,7 +29,7 @@ class CorridorCutter:
         dists = np.linalg.norm(t_xy[:, None, :] - t_xy[None, :, :], axis=2)
 
         # 2. 找到相距最远的两个杆塔作为线路的两个端点 (Start / End)
-        start_idx, end_idx = np.unravel_index(np.argmax(dists), dists.shape)
+        start_idx, _ = np.unravel_index(np.argmax(dists), dists.shape)
 
         # 3. 从起点出发，通过航向平滑加权的贪心遍历串联整条走廊
         ordered = [start_idx]
@@ -43,6 +43,9 @@ class CorridorCutter:
                 ordered.append(unvisited[0])
                 break
 
+            prev_norm = np.linalg.norm(prev_vec) if prev_vec is not None else 0.0
+            has_valid_prev = prev_norm > 1e-3
+
             best_candidate = None
             min_cost = float('inf')
 
@@ -51,10 +54,10 @@ class CorridorCutter:
                 cand_vec = t_xy[cand] - t_xy[curr]
                 cand_norm = np.linalg.norm(cand_vec)
 
-                if prev_vec is not None and cand_norm > 1e-3:
-                    cos_theta = np.dot(prev_vec, cand_vec) / (np.linalg.norm(prev_vec) * cand_norm)
-                    cos_theta = np.clip(cos_theta, -1.0, 1.0)
-                    # 夹角偏转惩罚项: 方向越一致 (cos~1) 惩罚越小; 大角度掉头 (cos~-1) 惩罚最大
+                if has_valid_prev and cand_norm > 1e-3:
+                    cos_theta = np.dot(prev_vec, cand_vec) / (prev_norm * cand_norm)
+                    cos_theta = float(np.clip(cos_theta, -1.0, 1.0))
+                    # 夹角偏转惩劳项: 方向越一致 (cos~1) 惩罚越小; 大角度掉头 (cos~-1) 惩罚最大
                     penalty = 1.0 + heading_penalty * (1.0 - cos_theta)
                 else:
                     penalty = 1.0
@@ -71,6 +74,7 @@ class CorridorCutter:
                 curr = best_candidate
             else:
                 fallback = min(unvisited, key=lambda idx: dists[curr, idx])
+                prev_vec = t_xy[fallback] - t_xy[curr]
                 ordered.append(fallback)
                 visited.add(fallback)
                 curr = fallback
@@ -134,26 +138,38 @@ class CorridorCutter:
         return spans
 
     @staticmethod
-    def export_spans(las_classified_path: str,
+    def export_spans(las_classified_or_data: Union[str, laspy.LasData],
                      spans: List[SpanSegment],
-                     output_dir: Optional[str] = None) -> List[str]:
+                     output_dir: Optional[str] = None,
+                     base_name: Optional[str] = None) -> List[str]:
         """
-        将切分好的各档点云高保真无损输出为独立的 LAS 文件
+        将切分好的各档点云高保真无损输出为独立的 LAS 文件。
+        支持传入已分类 LAS 文件路径 (str) 或内存中 LasData 对象。
         """
-        if not os.path.exists(las_classified_path) or len(spans) == 0:
+        if len(spans) == 0:
             return []
 
-        if output_dir is None:
-            base_dir = os.path.dirname(las_classified_path)
-            output_dir = os.path.join(base_dir, "spans")
+        if isinstance(las_classified_or_data, str):
+            if not os.path.exists(las_classified_or_data):
+                return []
+            if output_dir is None:
+                base_dir = os.path.dirname(las_classified_or_data)
+                output_dir = os.path.join(base_dir, "spans")
+            if base_name is None:
+                raw_name = os.path.splitext(os.path.basename(las_classified_or_data))[0]
+                clean_base = raw_name.removesuffix("_sign")
+            else:
+                clean_base = base_name.removesuffix("_sign")
+            las = laspy.read(las_classified_or_data)
+        else:
+            las = las_classified_or_data
+            if output_dir is None:
+                output_dir = "spans"
+            clean_base = base_name.removesuffix("_sign") if base_name is not None else "corridor"
 
         os.makedirs(output_dir, exist_ok=True)
 
         print(f"-> 正在将成果按两塔一档切分为 {len(spans)} 份独立 LAS 文件...")
-        las = laspy.read(las_classified_path)
-        base_name = os.path.splitext(os.path.basename(las_classified_path))[0]
-        clean_base = base_name.replace("_sign", "")
-
         generated_paths = []
         for span in spans:
             if len(span.point_indices) == 0:
@@ -215,24 +231,15 @@ class CorridorCutter:
         if output_dir is None:
             base_dir = os.path.dirname(las_input_path)
             output_dir = os.path.join(base_dir, "spans_raw")
-        os.makedirs(output_dir, exist_ok=True)
 
         base_name = os.path.splitext(os.path.basename(las_input_path))[0]
-        generated_paths = []
-
-        for span in spans:
-            if len(span.point_indices) == 0:
-                continue
-            span_filename = f"{base_name}_Span{span.span_index + 1}_#T{span.tower_from_idx + 1}-#T{span.tower_to_idx + 1}.las"
-            span_out_path = os.path.join(output_dir, span_filename)
-
-            # 零拷贝切片，保留 100% 原始数据属性
-            span_las = las[span.point_indices]
-            span_las.write(span_out_path)
-
-            span.output_las_path = os.path.abspath(span_out_path)
-            generated_paths.append(span.output_las_path)
-            print(f"   [Span {span.span_index + 1}] 导出原始单档: '{os.path.basename(span_out_path)}' (点数: {len(span.point_indices):,} | 档距: {span.span_length:.1f}m)")
+        # 直接复用 export_spans 高保真无损输出逻辑 (零拷贝切片，保留 100% 原始数据属性)
+        generated_paths = CorridorCutter.export_spans(
+            las_classified_or_data=las,
+            spans=spans,
+            output_dir=output_dir,
+            base_name=base_name
+        )
 
         total_time = time.time() - t_start
         print(f"[Done] 纯切片预处理完成！总耗时: {total_time:.2f} 秒 | 导出单档文件: {len(generated_paths)} 份")
