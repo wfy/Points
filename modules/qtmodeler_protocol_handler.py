@@ -1,23 +1,7 @@
 import os
 import sys
 import urllib.parse
-import subprocess
-
-def find_qtmodeler():
-    paths = [
-        r"C:\Program Files\QTModeler_820_UX_TRIAL\QTModeler.exe",
-        r"C:\Program Files\Applied Imagery\QT Modeler\QTModeler.exe",
-        r"C:\QTModeler_840_UX\QTModeler.exe",
-        r"D:\Program Files\QTModeler_820_UX_TRIAL\QTModeler.exe",
-        r"D:\Program Files\Applied Imagery\QT Modeler\QTModeler.exe",
-        r"D:\QTModeler_840_UX\QTModeler.exe",
-        r"E:\Program Files\Applied Imagery\QT Modeler\QTModeler.exe",
-        r"E:\QTModeler_840_UX\QTModeler.exe"
-    ]
-    for p in paths:
-        if os.path.exists(p):
-            return p
-    return None
+from modules.viewer import find_qtmodeler, QTModelerViewer
 
 def main():
     if len(sys.argv) < 2:
@@ -34,11 +18,8 @@ def main():
         las_path = las_path[:-1]
     
     if os.path.exists(las_path):
-        qt = find_qtmodeler()
-        if qt and os.path.exists(qt):
-            subprocess.Popen([qt, las_path])
-        else:
-            os.startfile(las_path)
+        viewer = QTModelerViewer()
+        viewer.open(las_path)
 
 if __name__ == "__main__":
     main()

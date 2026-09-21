@@ -1,69 +1,25 @@
 import os
 import time
-import subprocess
 import colorsys
 import numpy as np
 import laspy
-import tkinter as tk
-from tkinter import filedialog
 from typing import Optional, Set, Any
 from modules.config import ClassificationCode
 
-def close_qtmodeler():
-    """强行关闭后台运行的 QTModeler.exe 进程以释放文件独占占用"""
-    try:
-        cmd = 'taskkill /F /IM QTModeler.exe /T'
-        subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        time.sleep(0.3)
-    except Exception:
-        pass
+def close_qtmodeler() -> bool:
+    """[DEPRECATED] 强行关闭后台运行的 QTModeler 进程以释放文件独占占用。请使用 modules.viewer.get_viewer(name='qtmodeler').close()"""
+    from modules.viewer import get_viewer
+    return get_viewer(name="qtmodeler").close()
 
-def open_in_qtmodeler(las_path: str):
-    """
-    自动将分类好的 LAS 点云导入 QTModeler.exe 打开展示
-    """
-    abs_las = os.path.abspath(las_path)
+def open_in_qtmodeler(las_path: str) -> bool:
+    """[DEPRECATED] 将分类好的 LAS 点云导入 QTModeler 打开展示。请使用 modules.viewer.get_viewer().open(las_path)"""
+    from modules.viewer import get_viewer
+    return get_viewer().open(las_path)
 
-    qt_path = None
-    possible_paths = [
-        r"C:\Program Files\QTModeler_820_UX_TRIAL\QTModeler.exe",
-        r"C:\Program Files\Applied Imagery\QT Modeler\QTModeler.exe",
-        r"C:\QTModeler_840_UX\QTModeler.exe",
-        r"D:\Program Files\QTModeler_820_UX_TRIAL\QTModeler.exe",
-        r"D:\Program Files\Applied Imagery\QT Modeler\QTModeler.exe",
-        r"D:\QTModeler_840_UX\QTModeler.exe",
-        r"E:\Program Files\Applied Imagery\QT Modeler\QTModeler.exe",
-        r"E:\QTModeler_840_UX\QTModeler.exe"
-    ]
-    for p in possible_paths:
-        if os.path.exists(p):
-            qt_path = p
-            break
-
-    if qt_path and os.path.exists(qt_path):
-        try:
-            subprocess.Popen([qt_path, abs_las])
-            print(f"[Done] 成功启动 QTModeler 并加载 '{os.path.basename(abs_las)}'！")
-        except Exception as e:
-            print(f"推送到 QTModeler 失败: {e}")
-    else:
-        try:
-            os.startfile(abs_las)
-            print("[Done] 已通过 Windows 默认查看器打开成果文件。")
-        except Exception as e:
-            print(f"无法自动打开文件: {e}")
-
-def select_file_gui():
-    """打开文件选择 GUI 对话框"""
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes('-topmost', True)
-    file_path = filedialog.askopenfilename(
-        title="选择要分类处理的点云文件 (LAS/LAZ)",
-        filetypes=[("点云文件", "*.las *.laz"), ("所有文件", "*.*")]
-    )
-    root.destroy()
-    return file_path
+def select_file_gui(*args, **kwargs) -> Optional[str]:
+    """[DEPRECATED] 打开文件选择 GUI 对话框。请使用 modules.gui.select_file_gui()"""
+    from modules.gui import select_file_gui as _select_file_gui
+    return _select_file_gui(*args, **kwargs)
 
 def get_safe_output_path(target_path: str) -> str:
     """
@@ -112,7 +68,8 @@ def export_colored_las(las_input_path: str,
     支持 Class 2(地面), Class 3(植被), Class 14(导线/跳线), Class 15(杆塔), Class 16(耐张绝缘子串)
     """
     if force_kill_viewer:
-        close_qtmodeler()
+        # [DEPRECATED] force_kill_viewer 内部已无害化，进程管理由 PipelineExecutor / ViewerHandler 控制
+        pass
         
     print("-> 正在写入色彩与分类标记至 LAS 文件...")
     

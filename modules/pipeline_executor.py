@@ -320,6 +320,10 @@ class PipelineExecutor:
         result = self.run(points, config=cfg, verbose=is_verbose)
         
         # 3. 如果需要落盘成果文件
+        if cfg.export.force_kill_viewer:
+            from modules.viewer import get_viewer
+            get_viewer().close()
+
         t_exp = time.time()
         meta = result.metadata
         point_line_id = meta.get('point_line_id', np.zeros(len(points), dtype=int))

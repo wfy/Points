@@ -10,7 +10,8 @@ import laspy
 from modules.config import PipelineConfig, DEFAULT_CONFIG, PipelineStage
 from modules.pipeline_executor import PipelineExecutor
 from modules.corridor_cutter import cut_corridors_by_spans, export_split_spans, split_raw_corridor
-from modules.utils import select_file_gui, open_in_qtmodeler
+from modules.gui import select_file_gui
+from modules.viewer import get_viewer
 
 def fast_classify_and_color_powerline(las_input_path: str, 
                                       las_output_path: str, 
@@ -144,7 +145,7 @@ def run_auto_span_pipeline(las_input_path: str, config: PipelineConfig = None) -
     print(f"========================================================")
     
     if len(classified_paths) > 0 and config.export.open_qtmodeler:
-        open_in_qtmodeler(classified_paths[0])
+        get_viewer(config.export).open(classified_paths[0])
         
     return classified_paths
 
@@ -177,7 +178,8 @@ if __name__ == "__main__":
         cfg.pipeline.stop_after = PipelineStage.from_string(args.stop_after)
     if args.quiet:
         cfg.pipeline.verbose = False
-    cfg.export.force_kill_viewer = args.force_kill_viewer
+    if args.force_kill_viewer:
+        get_viewer().close()
     cfg.export.open_qtmodeler = not args.no_qtmodeler
     cfg.corridor.split_spans = args.split_spans
     cfg.corridor.corridor_half_width = args.corridor_width
@@ -220,7 +222,7 @@ if __name__ == "__main__":
             
         out_path = fast_classify_and_color_powerline(INPUT_LAS, OUTPUT_LAS, config=cfg)
         if cfg.export.open_qtmodeler:
-            open_in_qtmodeler(out_path)
+            get_viewer(cfg.export).open(out_path)
             
     elif not INPUT_LAS:
         print("未选择任何文件，操作已取消。")

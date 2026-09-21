@@ -43,3 +43,16 @@ _Avoid_: RawWireOutput, ExtractedLines
 **TensionJumper**:
 耐张塔横担下方跨接不同档段导线的特异性引流跳线弧段实体。
 _Avoid_: LoopCable, BridgeWire, BypassLine
+
+**ViewerHandler**:
+负责管理三维点云成果预览生命周期（探测、启动与关闭外部三维可视化软件）的统一协议抽象。
+_Avoid_: ViewerManager, DisplayController, ModelerService
+
+**QTModelerViewer**:
+适配 Applied Imagery QTModeler 专业点云可视化分析软件的具体查看器实现。
+_Avoid_: QTApp, ModelerRunner
+
+**NullViewer**:
+在自动化测试、批量离线运行或无头服务器环境下执行静默无操作的安全空对象查看器。
+_Avoid_: MockViewer, DummyViewer, EmptyViewer
+
