@@ -19,13 +19,16 @@ def select_file_gui(
         from tkinter import filedialog
 
         root = tk.Tk()
-        root.withdraw()
-        root.attributes('-topmost', True)
-        file_path = filedialog.askopenfilename(
-            title=title,
-            filetypes=filetypes
-        )
-        root.destroy()
+        try:
+            root.withdraw()
+            root.attributes('-topmost', True)
+            file_path = filedialog.askopenfilename(
+                title=title,
+                filetypes=filetypes
+            )
+        finally:
+            root.destroy()
+
         if file_path:
             return os.path.abspath(file_path)
         return None

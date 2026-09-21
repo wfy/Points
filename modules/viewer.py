@@ -96,7 +96,8 @@ class QTModelerViewer:
         return self._executable_path or find_qtmodeler()
 
     def is_available(self) -> bool:
-        return bool(find_qtmodeler())
+        path = self.executable_path
+        return bool(path and os.path.exists(path))
 
     def open(self, file_path: str) -> bool:
         abs_path = os.path.abspath(file_path)
@@ -116,8 +117,8 @@ class QTModelerViewer:
         """关闭运行中的 QTModeler 进程释放文件占用"""
         if sys.platform == "win32":
             try:
-                cmd = 'taskkill /F /IM QTModeler.exe /T'
-                subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                cmd = ['taskkill', '/F', '/IM', 'QTModeler.exe', '/T']
+                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 time.sleep(0.3)
                 return True
             except Exception:
@@ -131,14 +132,17 @@ def get_viewer(config: Optional[ExportConfig] = None, name: Optional[str] = None
     """
     if config is not None and not config.open_qtmodeler:
         return NullViewer()
-    if name == "null":
-        return NullViewer()
-    if name == "system":
-        return SystemDefaultViewer()
-    if name == "qtmodeler":
-        return QTModelerViewer()
+    if name is not None:
+        if name == "null":
+            return NullViewer()
+        if name == "system":
+            return SystemDefaultViewer()
+        if name == "qtmodeler":
+            return QTModelerViewer()
+        raise ValueError(f"Unknown viewer name: '{name}'. Supported: 'null', 'system', 'qtmodeler'")
 
     # 默认策略：若检测到 QTModeler 则选用，否则回退至系统默认
-    if find_qtmodeler():
-        return QTModelerViewer()
+    qt_viewer = QTModelerViewer()
+    if qt_viewer.is_available():
+        return qt_viewer
     return SystemDefaultViewer()

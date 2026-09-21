@@ -1,7 +1,7 @@
 import os
 import sys
 import urllib.parse
-from modules.viewer import find_qtmodeler, QTModelerViewer
+from modules.viewer import QTModelerViewer
 
 def main():
     if len(sys.argv) < 2:

@@ -80,5 +80,39 @@ class TestViewerModule(unittest.TestCase):
         viewer = get_viewer(config=cfg)
         self.assertIsInstance(viewer, SystemDefaultViewer)
 
+    @patch("subprocess.run")
+    def test_qtmodeler_viewer_close(self, mock_run):
+        viewer = QTModelerViewer()
+        with patch("sys.platform", "win32"):
+            success = viewer.close()
+            self.assertTrue(success)
+            mock_run.assert_called_once()
+            cmd = mock_run.call_args[0][0]
+            self.assertIn("taskkill", cmd)
+
+    def test_custom_executable_path_is_available(self):
+        fake_bin = r"C:\custom\bin\QTModeler.exe"
+        viewer = QTModelerViewer(executable_path=fake_bin)
+        with patch("os.path.exists", side_effect=lambda p: p == fake_bin):
+            self.assertTrue(viewer.is_available())
+
+    def test_factory_unknown_name_raises(self):
+        with self.assertRaises(ValueError):
+            get_viewer(name="invalid_viewer_name")
+
+    @patch("modules.viewer.get_viewer")
+    def test_utils_viewer_shims(self, mock_get_viewer):
+        from modules.utils import close_qtmodeler, open_in_qtmodeler
+
+        mock_instance = MagicMock()
+        mock_instance.close.return_value = True
+        mock_instance.open.return_value = True
+        mock_get_viewer.return_value = mock_instance
+
+        self.assertTrue(close_qtmodeler())
+        self.assertTrue(open_in_qtmodeler("dummy.las"))
+        mock_instance.close.assert_called_once()
+        mock_instance.open.assert_called_once_with("dummy.las")
+
 if __name__ == "__main__":
     unittest.main()
