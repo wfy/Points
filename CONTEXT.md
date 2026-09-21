@@ -56,3 +56,11 @@ _Avoid_: QTApp, ModelerRunner
 在自动化测试、批量离线运行或无头服务器环境下执行静默无操作的安全空对象查看器。
 _Avoid_: MockViewer, DummyViewer, EmptyViewer
 
+**SpanSegment**:
+输电线路两座相邻铁塔之间的单档走廊定向包围空间及切分出的点云子集数据实体。
+_Avoid_: SpanSlice, SubCloud, CorridorBlock
+
+**CorridorCutter**:
+负责铁塔拓扑链路排序、走廊定向包围盒（OBB）几何投影切割与多档点云无损导出的深度计算模块。
+_Avoid_: SpanSplitter, CorridorManager, LasSlicer
+

@@ -265,6 +265,17 @@ class PipelineExecutor:
             
         tower_arm_pts_idx = off_ground_idx[is_tower_arm & is_tower] if (is_tower_arm is not None and np.any(is_tower_arm & is_tower)) else np.array([], dtype=int)
 
+        # 3. 走廊分档内存切片 (当配置开启且检测到至少 2 座杆塔时)
+        spans = None
+        if getattr(cfg.corridor, 'split_spans', False) and len(tower_infos) >= 2:
+            from modules.corridor_cutter import CorridorCutter
+            spans = CorridorCutter.cut_spans(
+                points=points,
+                tower_infos=tower_infos,
+                corridor_half_width=cfg.corridor.corridor_half_width,
+                buffer_length=cfg.corridor.buffer_length
+            )
+
         return PipelineResult(
             num_points=num_points,
             classification=classification,
@@ -273,6 +284,7 @@ class PipelineExecutor:
             stage_timings=stage_timings,
             ground_result=ground_res,
             extraction_result=ext_res,
+            spans=spans,
             metadata={
                 'point_line_id': point_line_id,
                 'suspect_line_ids': suspect_line_ids,
@@ -349,5 +361,13 @@ class PipelineExecutor:
         )
         result.stage_timings["export"] = float(time.time() - t_exp)
         result.metadata["actual_output_path"] = actual_path
-        
+
+        # 4. 如果包含切档成果，导出独立单档 LAS 文件
+        if result.spans is not None and len(result.spans) > 0:
+            from modules.corridor_cutter import CorridorCutter
+            split_paths = CorridorCutter.export_spans(actual_path, result.spans)
+            result.metadata["split_span_paths"] = split_paths
+            if is_verbose:
+                print(f"   两塔一档切分完成 | 生成独立档段 LAS 文件: {len(split_paths)} 份")
+
         return result

@@ -232,6 +232,18 @@ class WireExtractionResult:
 ExtractionResult = WireExtractionResult
 
 @dataclass
+class SpanSegment:
+    """两塔一档走廊切片数据模型"""
+    span_index: int                       # 档段顺序编号 (0-based)
+    tower_from_idx: int                   # 起始杆塔全局索引
+    tower_to_idx: int                     # 终止杆塔全局索引
+    tower_from_pos: np.ndarray            # 起始杆塔 2D 坐标 [cx, cy]
+    tower_to_pos: np.ndarray              # 终止杆塔 2D 坐标 [cx, cy]
+    span_length: float                    # 档距水平跨度 (m)
+    point_indices: np.ndarray             # 属于本档走廊的点云全局索引
+    output_las_path: str = ""             # 输出 LAS 文件完整路径
+
+@dataclass
 class PipelineResult:
     """
     点云分类流水线整体执行成果对象 (Domain Result Container)
@@ -243,6 +255,7 @@ class PipelineResult:
     stage_timings: Dict[str, float] = field(default_factory=dict)
     ground_result: Optional[GroundResult] = None
     extraction_result: Optional[ExtractionResult] = None
+    spans: Optional[List[SpanSegment]] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -266,7 +279,7 @@ class PipelineResult:
         return float(sum(self.stage_timings.values()))
 
     def summary(self) -> dict:
-        return {
+        info = {
             'total_points': self.num_points,
             'ground_count': int(len(self.ground_indices)),
             'tower_count': int(len(self.tower_indices)),
@@ -277,3 +290,6 @@ class PipelineResult:
             'total_time_s': round(self.total_time, 2),
             'stage_timings': {k: round(v, 3) for k, v in self.stage_timings.items()}
         }
+        if self.spans is not None:
+            info['span_count'] = len(self.spans)
+        return info

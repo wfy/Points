@@ -9,7 +9,7 @@ import laspy
 
 from modules.config import PipelineConfig, DEFAULT_CONFIG, PipelineStage
 from modules.pipeline_executor import PipelineExecutor
-from modules.corridor_cutter import cut_corridors_by_spans, export_split_spans, split_raw_corridor
+from modules.corridor_cutter import split_raw_corridor
 from modules.gui import select_file_gui
 from modules.viewer import get_viewer
 
@@ -47,21 +47,6 @@ def fast_classify_and_color_powerline(las_input_path: str,
     summary = result.summary()
     print(f"[Done] 全流程处理完成！总耗时: {total_cost:.2f} 秒")
     print(f"   分类统计: 地面={summary['ground_count']:,} | 杆塔={summary['tower_count']:,} | 导线={summary['wire_count']:,} | 植被/杂波={summary['unclassified_count']:,}")
-    
-    # 后置切分 (仅在整段模式下指定 --split-spans 时触发)
-    if config.corridor.split_spans and len(result.towers) >= 2:
-        t_split = time.time()
-        las = laspy.read(las_input_path)
-        points = np.column_stack([np.array(las.x), np.array(las.y), np.array(las.z)])
-        spans = cut_corridors_by_spans(
-            points=points,
-            tower_infos=result.towers,
-            corridor_half_width=config.corridor.corridor_half_width,
-            buffer_length=config.corridor.buffer_length
-        )
-        split_paths = export_split_spans(actual_out_path, spans)
-        print(f"   两塔一档切分完成 (耗时: {time.time() - t_split:.2f}s) | 生成独立档段 LAS 文件: {len(split_paths)} 份")
-        
     return actual_out_path
 
 
