@@ -31,3 +31,15 @@ _Avoid_: Phase, Step, PipelineStatus
 **PipelineResult**:
 点云分类流水线执行后输出的整体领域成果，封装各类别点云掩膜、提取出的铁塔与导线实体以及耗时指标。
 _Avoid_: OutputData, ExecutionContext, RawResult
+
+**WireExtractor**:
+负责根据杆塔先验与空间几何姿态，统筹走廊定向切片、种子体素追踪及跳线拟合，输出标准化导线实体的深度计算模块。
+_Avoid_: CableDetector, LineFinder, WireTracer
+
+**WireExtractionResult**:
+导线提取阶段的领域成果容器，封装最终导线点索引集合、独立的线路簇列表 (`WireCluster`) 及分相着色映射，绝不泄露并查集或中间拓扑指针。
+_Avoid_: RawWireOutput, ExtractedLines
+
+**TensionJumper**:
+耐张塔横担下方跨接不同档段导线的特异性引流跳线弧段实体。
+_Avoid_: LoopCable, BridgeWire, BypassLine

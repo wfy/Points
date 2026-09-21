@@ -81,7 +81,7 @@ class TowerEntity:
 @dataclass
 class WireCluster:
     """
-    导线分段体素连通簇实体 (含可选三维物理悬链线模型)
+    导线分段体素连通簇实体 (含可选三维物理悬链线模型与拓扑标识)
     """
     members: List[int]
     center: np.ndarray
@@ -90,47 +90,146 @@ class WireCluster:
     linearity: float
     min_var: float
     catenary: Optional[Any] = None
+    line_id: int = 0
+    global_indices: np.ndarray = field(default_factory=lambda: np.array([], dtype=int))
+    is_suspect: bool = False
+    is_jumper: bool = False
 
     def __getitem__(self, key: str) -> Any:
         if hasattr(self, key):
             return getattr(self, key)
         raise KeyError(f"WireCluster has no attribute '{key}'")
 
+    def __setitem__(self, key: str, value: Any):
+        setattr(self, key, value)
+
     def get(self, key: str, default: Any = None) -> Any:
         return getattr(self, key, default)
 
+    def to_dict(self) -> dict:
+        return {
+            'members': self.members,
+            'center': self.center,
+            'dir': self.dir,
+            'span': self.span,
+            'linearity': self.linearity,
+            'min_var': self.min_var,
+            'catenary': self.catenary,
+            'line_id': self.line_id,
+            'global_indices': self.global_indices,
+            'is_suspect': self.is_suspect,
+            'is_jumper': self.is_jumper
+        }
+
 @dataclass
-class ExtractionResult:
+class WireExtractionResult:
     """
-    导线提取与追踪阶段成果容器 (支持元组解包及绝缘子挂点索引)
+    导线提取阶段的领域成果容器 (Domain Result Container)
+    内部密封并查集与拓扑图结构，对外交付扁平化的 WireCluster 集合，并保持 100% 向下兼容
     """
-    cable_pts_idx: np.ndarray
-    point_line_id: np.ndarray
-    all_confirmed: List[WireCluster]
-    suspect_line_ids: Set[int]
-    find_line_func: Callable[[int], int]
-    insulator_pts_idx: np.ndarray = field(default_factory=lambda: np.array([], dtype=int))
+    wires: List[WireCluster] = field(default_factory=list)
+    cable_indices: np.ndarray = field(default_factory=lambda: np.array([], dtype=int))
+    jumper_indices: np.ndarray = field(default_factory=lambda: np.array([], dtype=int))
+    insulator_indices: np.ndarray = field(default_factory=lambda: np.array([], dtype=int))
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    _cached_point_line_id: Optional[np.ndarray] = field(default=None, repr=False)
+    _custom_find_line_func: Optional[Callable[[int], int]] = field(default=None, repr=False)
+    _custom_suspect_line_ids: Optional[Set[int]] = field(default=None, repr=False)
+
+    def __init__(
+        self,
+        wires: Optional[List[WireCluster]] = None,
+        cable_indices: Optional[np.ndarray] = None,
+        jumper_indices: Optional[np.ndarray] = None,
+        insulator_indices: Optional[np.ndarray] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        # 兼容旧版参数:
+        cable_pts_idx: Optional[np.ndarray] = None,
+        point_line_id: Optional[np.ndarray] = None,
+        all_confirmed: Optional[List[WireCluster]] = None,
+        suspect_line_ids: Optional[Set[int]] = None,
+        find_line_func: Optional[Callable[[int], int]] = None,
+        insulator_pts_idx: Optional[np.ndarray] = None,
+        **kwargs
+    ):
+        self.wires = wires if wires is not None else (all_confirmed if all_confirmed is not None else [])
+        self.cable_indices = cable_indices if cable_indices is not None else (cable_pts_idx if cable_pts_idx is not None else np.array([], dtype=int))
+        self.jumper_indices = jumper_indices if jumper_indices is not None else np.array([], dtype=int)
+        self.insulator_indices = insulator_indices if insulator_indices is not None else (insulator_pts_idx if insulator_pts_idx is not None else np.array([], dtype=int))
+        self.metadata = metadata if metadata is not None else {}
+        self._cached_point_line_id = point_line_id
+        self._custom_find_line_func = find_line_func
+        self._custom_suspect_line_ids = suspect_line_ids
+
+    @property
+    def cable_pts_idx(self) -> np.ndarray:
+        return self.cable_indices
+
+    @property
+    def all_confirmed(self) -> List[WireCluster]:
+        return self.wires
+
+    @property
+    def insulator_pts_idx(self) -> np.ndarray:
+        return self.insulator_indices
+
+    @property
+    def suspect_line_ids(self) -> Set[int]:
+        if self._custom_suspect_line_ids is not None:
+            return self._custom_suspect_line_ids
+        return {w.line_id for w in self.wires if w.is_suspect and w.line_id > 0}
+
+    @property
+    def find_line_func(self) -> Callable[[int], int]:
+        if self._custom_find_line_func is not None:
+            return self._custom_find_line_func
+        return lambda x: x
+
+    @property
+    def point_line_id(self) -> np.ndarray:
+        """
+        向后兼容属性：延迟按需生成全局点到线路 ID 的映射向量
+        """
+        if self._cached_point_line_id is not None:
+            return self._cached_point_line_id
+        if 'point_line_id' in self.metadata:
+            return self.metadata['point_line_id']
+
+        if len(self.cable_indices) == 0:
+            return np.array([], dtype=int)
+
+        max_idx = int(np.max(self.cable_indices)) if len(self.cable_indices) > 0 else 0
+        arr_len = max(max_idx + 1, self.metadata.get('num_points', max_idx + 1))
+        arr = np.zeros(arr_len, dtype=int)
+        for w in self.wires:
+            if len(w.global_indices) > 0 and w.line_id > 0:
+                arr[w.global_indices] = w.line_id
+        self._cached_point_line_id = arr
+        return arr
 
     def __iter__(self) -> Iterator[Any]:
         # 兼容 5 元组或 6 元组解包
         return iter((
-            self.cable_pts_idx,
+            self.cable_indices,
             self.point_line_id,
-            self.all_confirmed,
+            self.wires,
             self.suspect_line_ids,
             self.find_line_func,
-            self.insulator_pts_idx
+            self.insulator_indices
         ))
 
     def __getitem__(self, index: int) -> Any:
         return (
-            self.cable_pts_idx,
+            self.cable_indices,
             self.point_line_id,
-            self.all_confirmed,
+            self.wires,
             self.suspect_line_ids,
             self.find_line_func,
-            self.insulator_pts_idx
+            self.insulator_indices
         )[index]
+
+# 向后兼容类型别名
+ExtractionResult = WireExtractionResult
 
 @dataclass
 class PipelineResult:

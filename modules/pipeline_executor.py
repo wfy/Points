@@ -19,6 +19,7 @@ from modules.models import (
 )
 from modules.ground_separator import separate_ground
 from modules.tower_detector import detect_towers
+from modules.wire_extractor import WireExtractor
 from modules.topdown_wire_extractor import extract_wires_topdown
 from modules.topology_validator import validate_tower_topology
 from modules.utils import export_colored_las
@@ -164,7 +165,8 @@ class PipelineExecutor:
             print("-> 3/4 执行 PCA 特征姿态分析与 3D 悬链线完整连续追踪...")
         t3 = time.time()
         arm_mask = is_tower_arm if is_tower_arm is not None else is_near_tower_high_arm
-        ext_res = extract_wires_topdown(
+        wire_extractor = WireExtractor(config=cfg)
+        ext_res = wire_extractor.extract(
             points=points,
             off_ground_pts=off_ground_pts,
             off_ground_idx=off_ground_idx,
@@ -177,8 +179,8 @@ class PipelineExecutor:
         )
         stage_timings["wire"] = float(time.time() - t3)
         
-        cable_pts_idx = ext_res.cable_pts_idx
-        all_confirmed = ext_res.all_confirmed
+        cable_pts_idx = ext_res.cable_indices
+        all_confirmed = ext_res.wires
         point_line_id = ext_res.point_line_id
         suspect_line_ids = ext_res.suspect_line_ids
         find_line_func = ext_res.find_line_func

@@ -553,169 +553,30 @@ def extract_wires_topdown(points: np.ndarray,
                           off_ground_idx: np.ndarray,
                           rel_z: np.ndarray,
                           is_tower: np.ndarray,
-                          is_tower_arm: np.ndarray,
-                          is_near_tower_high_arm: np.ndarray,
-                          tower_infos: List[Union[TowerEntity, dict]],
+                          is_tower_arm: np.ndarray = None,
+                          is_near_tower_high_arm: np.ndarray = None,
+                          tower_infos: List[Union[TowerEntity, dict]] = None,
                           config: PipelineConfig = None) -> ExtractionResult:
     """
-    基于杆塔先验引导的自顶向下 (Top-down) 导线提取主入口函数
+    [DEPRECATED] 基于杆塔先验引导的自顶向下导线提取门面函数。
+    建议直接调用 modules.wire_extractor.WireExtractor().extract(...)
     """
-    if config is None:
-        config = DEFAULT_CONFIG
-
-    p_cfg = config.powerline
-    num_points = len(points)
-    topdown_cable_indices = []
-    topdown_point_line_id = np.zeros(num_points, dtype=int)
-    topdown_clusters: List[WireCluster] = []
-
-    # 1. 走廊定向截面多通道 3D 悬链线高精提取
-    if config.powerline.enable_topdown_prior and len(tower_infos) >= 1:
-        topdown_cable_indices, topdown_point_line_id, topdown_clusters = extract_wires_by_corridor_slices(
-            points=points,
-            off_ground_pts=off_ground_pts,
-            off_ground_idx=off_ground_idx,
-            rel_z=rel_z,
-            is_tower=is_tower,
-            tower_infos=tower_infos,
-            config=config
-        )
-
-    # 2. 兜底与跳线追踪器 (Tracker)
-    high_mask = rel_z >= p_cfg.min_rel_z
-    high_pts = off_ground_pts[high_mask]
-    high_indices = off_ground_idx[high_mask]
-    high_is_near_arm = is_near_tower_high_arm[high_mask]
-    high_is_tower = is_tower[high_mask]
-
-    cable_seed_indices = extract_wire_seeds(
-        high_pts=high_pts,
-        high_indices=high_indices,
-        high_is_near_arm=high_is_near_arm,
-        high_is_tower=high_is_tower,
-        tower_infos=tower_infos,
-        seed_grid_size=p_cfg.seed_grid_size,
-        pca_radius=p_cfg.pca_radius,
-        linearity_thresh=p_cfg.linearity_thresh,
-        arm_linearity_thresh=p_cfg.arm_linearity_thresh,
-        bundle_adapt_linearity_thresh=p_cfg.bundle_adapt_linearity_thresh,
-        wire_seed_l3_max=p_cfg.wire_seed_l3_max,
-        wire_seed_l3_bundle_max=p_cfg.wire_seed_l3_bundle_max,
-        wire_seed_density_max=p_cfg.wire_seed_density_max,
-        enable_bundle_adapt=p_cfg.enable_bundle_conductor_adapt
+    import warnings
+    warnings.warn(
+        "extract_wires_topdown is deprecated; please use WireExtractor.extract() directly.",
+        DeprecationWarning,
+        stacklevel=2
     )
-
-    final_cable_pts, cable_pts_idx, all_confirmed = cluster_wire_candidates(
+    from modules.wire_extractor import WireExtractor
+    extractor = WireExtractor(config=config)
+    return extractor.extract(
         points=points,
-        high_pts=high_pts,
-        high_indices=high_indices,
-        cable_seed_indices=cable_seed_indices,
-        c_voxel_size=p_cfg.voxel_cluster_size,
-        tower_infos=tower_infos
-    )
-
-    suspect_line_ids = filter_canopy_by_probes(
-        final_cable_pts=final_cable_pts,
         off_ground_pts=off_ground_pts,
-        all_confirmed=all_confirmed,
-        tower_infos=tower_infos
-    )
-
-    tracker_cable_pts_idx, tracker_point_line_id, find_line_func = track_and_bridge_powerlines(
-        points=points,
-        high_pts=high_pts,
-        high_indices=high_indices,
-        final_cable_pts=final_cable_pts,
-        cable_pts_idx=cable_pts_idx,
-        all_confirmed=all_confirmed,
-        suspect_line_ids=suspect_line_ids,
+        off_ground_idx=off_ground_idx,
+        rel_z=rel_z,
+        is_tower=is_tower,
+        is_tower_arm=is_tower_arm,
+        is_near_tower_high_arm=is_near_tower_high_arm,
         tower_infos=tower_infos,
-        max_tracking_steps=p_cfg.max_tracking_steps,
-        step_size=p_cfg.tracking_step,
-        use_catenary_tracking=p_cfg.use_catenary_tracking
-    )
-
-    # 3. 结果合并：topdown 与 tracker 双通道 union (不再丢弃 tracker 档间完整导线)
-    n_top_clusters = len(topdown_clusters)
-    topdown_ok = len(topdown_cable_indices) >= 30
-
-    if topdown_ok:
-        merged_cable_indices = np.union1d(topdown_cable_indices, tracker_cable_pts_idx).astype(int)
-        final_point_line_id = topdown_point_line_id.copy()
-
-        # 补全 tracker 通道点的线 ID (偏移到 topdown 簇之后，避免 ID 冲突)
-        missing_mask = (final_point_line_id[merged_cable_indices] == 0)
-        missing_global_pts = merged_cable_indices[missing_mask]
-        for g_idx in missing_global_pts:
-            t_id = tracker_point_line_id[g_idx]
-            final_point_line_id[g_idx] = (t_id + n_top_clusters) if t_id > 0 else 1
-
-        # tracker 簇并入输出
-        merged_confirmed = list(topdown_clusters) + list(all_confirmed)
-
-        # find_line 包装：tracker 线 ID 偏移后映射回 tracker 的并查集
-        def merged_find_line(raw_id: int) -> int:
-            if raw_id <= n_top_clusters or n_top_clusters == 0:
-                return raw_id
-            return find_line_func(raw_id - n_top_clusters) + n_top_clusters
-
-        merged_suspect = {sid + n_top_clusters for sid in suspect_line_ids}
-    else:
-        merged_cable_indices = tracker_cable_pts_idx
-        final_point_line_id = tracker_point_line_id
-        merged_confirmed = list(all_confirmed)
-        merged_suspect = set(suspect_line_ids)
-        merged_find_line = find_line_func
-
-    # 4. 【耐张跳线专用 3D 弧段提取器】提取横担下方引流跳线并并入成果
-    if config.powerline.enable_jumper_extraction and len(tower_infos) > 0:
-        jumper_idx = extract_tension_jumpers(
-            points=points,
-            off_ground_pts=off_ground_pts,
-            off_ground_idx=off_ground_idx,
-            rel_z=rel_z,
-            is_tower=is_tower,
-            tower_infos=tower_infos,
-            cable_pts_idx=merged_cable_indices,
-            config=config
-        )
-        if len(jumper_idx) > 0:
-            new_jumpers = np.setdiff1d(jumper_idx, merged_cable_indices)
-            if len(new_jumpers) > 0:
-                merged_cable_indices = np.union1d(merged_cable_indices, new_jumpers).astype(int)
-                jumper_line_id = len(merged_confirmed) + 1
-                for j_pt in new_jumpers:
-                    final_point_line_id[j_pt] = jumper_line_id
-                j_pts = points[new_jumpers]
-                if len(j_pts) >= 4:
-                    j_cov = np.cov(j_pts.T)
-                    j_evals, j_evecs = np.linalg.eigh(j_cov)
-                    j_dir = j_evecs[:, 2]
-                    j_lin = float((j_evals[2] - j_evals[1]) / j_evals[2]) if j_evals[2] > 0 else 0.6
-                else:
-                    j_dir = np.array([1.0, 0.0, 0.0])
-                    j_lin = 0.6
-                merged_confirmed.append(WireCluster(
-                    members=list(range(len(new_jumpers))),
-                    center=np.mean(j_pts, axis=0),
-                    dir=j_dir,
-                    span=float(np.linalg.norm(np.ptp(j_pts, axis=0))),
-                    linearity=j_lin,
-                    min_var=0.2,
-                    catenary=None
-                ))
-
-    # 铁塔点硬互斥保证 (零退化与高查准率保障)
-    tower_pts_idx = off_ground_idx[is_tower] if np.any(is_tower) else np.array([], dtype=int)
-    if len(tower_pts_idx) > 0 and len(merged_cable_indices) > 0:
-        merged_cable_indices = np.setdiff1d(merged_cable_indices, tower_pts_idx)
-        final_point_line_id[tower_pts_idx] = 0
-
-    return ExtractionResult(
-        cable_pts_idx=merged_cable_indices,
-        point_line_id=final_point_line_id,
-        all_confirmed=merged_confirmed,
-        suspect_line_ids=merged_suspect,
-        find_line_func=merged_find_line,
-        insulator_pts_idx=np.array([], dtype=int)
+        config=config
     )

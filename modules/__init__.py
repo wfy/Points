@@ -1,9 +1,10 @@
 """
 Powerline Point Cloud Classification Modules.
 """
-from modules.models import GroundResult, TowerEntity, WireCluster, ExtractionResult, PipelineResult
+from modules.models import GroundResult, TowerEntity, WireCluster, ExtractionResult, WireExtractionResult, PipelineResult
 from modules.config import PipelineConfig, DEFAULT_CONFIG, ClassificationCode, CorridorConfig, PipelineStage
 from modules.pipeline_executor import PipelineExecutor
+from modules.wire_extractor import WireExtractor
 from modules.catenary import CatenaryModel, fit_catenary_3d
 from modules.ground_separator import separate_ground
 from modules.tower_detector import detect_towers
@@ -17,6 +18,8 @@ __all__ = [
     'PipelineExecutor',
     'PipelineResult',
     'PipelineStage',
+    'WireExtractor',
+    'WireExtractionResult',
     'GroundResult',
     'TowerEntity',
     'WireCluster',

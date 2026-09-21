@@ -6,6 +6,7 @@ import numpy as np
 import laspy
 import tkinter as tk
 from tkinter import filedialog
+from typing import Optional, Set, Any
 from modules.config import ClassificationCode
 
 def close_qtmodeler():
@@ -100,9 +101,9 @@ def export_colored_las(las_input_path: str,
                        tower_pts_idx: np.ndarray,
                        tower_arm_pts_idx: np.ndarray,
                        all_confirmed: list,
-                       point_line_id: np.ndarray,
-                       suspect_line_ids: set,
-                       find_line_func,
+                       point_line_id: Optional[np.ndarray] = None,
+                       suspect_line_ids: Optional[set] = None,
+                       find_line_func: Optional[Any] = None,
                        insulator_pts_idx: np.ndarray = None,
                        force_kill_viewer: bool = False,
                        tower_below_arm_pts_idx: np.ndarray = None) -> str:
@@ -117,6 +118,7 @@ def export_colored_las(las_input_path: str,
     
     las = las_raw_data
     num_points = len(las.x)
+    suspect_set = suspect_line_ids if suspect_line_ids is not None else set()
     
     # 严格去重：绝缘子优先，从杆塔与导线中排除
     if insulator_pts_idx is not None and len(insulator_pts_idx) > 0:
@@ -133,7 +135,7 @@ def export_colored_las(las_input_path: str,
     if len(cable_pts_idx) > 0:
         classifications[cable_pts_idx] = int(ClassificationCode.WIRE_CONDUCTOR)                     # 14 = 导线/跳线
     if len(tower_pts_idx) > 0:
-        classifications[tower_pts_idx] = int(ClassificationCode.TRANSMISSION_TOWER)                 # 15 = 杆塔
+        classifications[tower_pts_idx] = int(ClassificationCode.TRANSMISSION_TOWER)                 # 15 = 铁塔主体
     if insulator_pts_idx is not None and len(insulator_pts_idx) > 0:
         classifications[insulator_pts_idx] = int(ClassificationCode.INSULATOR)                      # 16 = 耐张绝缘子串
 
@@ -202,33 +204,58 @@ def export_colored_las(las_input_path: str,
         num_lines = len(all_confirmed)
         line_color_map = {}
         for line_i in range(1, num_lines + 1):
-            if line_i in suspect_line_ids:
+            if line_i in suspect_set:
                 line_color_map[line_i] = (65535, 0, 0)  # 警示纯红
             elif line_i <= len(WIRE_PRESET_COLORS):
                 line_color_map[line_i] = WIRE_PRESET_COLORS[line_i - 1]
             else:
-                # 算法动态生成：严格避开杆塔黄色/蓝色区间、植被绿色区间以及地面灰度
-                # 仅在 [0.0, 0.09] (红橙) 与 [0.70, 0.95] (紫/洋红/粉红) 之间生成
                 t = (line_i * 0.618033988749895) % 1.0
                 if t < 0.25:
-                    h = (t / 0.25) * 0.09               # 红色 -> 橙色
+                    h = (t / 0.25) * 0.09
                 else:
-                    h = 0.70 + ((t - 0.25) / 0.75) * 0.25  # 紫 -> 洋红 -> 粉红 -> 玫瑰红
+                    h = 0.70 + ((t - 0.25) / 0.75) * 0.25
                 r, g, b = colorsys.hsv_to_rgb(h, 0.95, 1.0)
                 line_color_map[line_i] = (int(r * 65535), int(g * 65535), int(b * 65535))
             
-        for pt_idx in cable_pts_idx:
-            raw_id = point_line_id[pt_idx]
-            l_id = find_line_func(raw_id) if raw_id > 0 else raw_id
-            if l_id in line_color_map:
-                cr, cg, cb = line_color_map[l_id]
-                red[pt_idx] = cr
-                green[pt_idx] = cg
-                blue[pt_idx] = cb
-            else:
-                red[pt_idx] = 65535
-                green[pt_idx] = 20000
-                blue[pt_idx] = 0
+        # 优先直接使用 WireCluster 自包含的 global_indices 进行实体直出向量化着色
+        has_direct_indices = any(hasattr(w, 'global_indices') and len(getattr(w, 'global_indices', [])) > 0 for w in all_confirmed)
+        if has_direct_indices:
+            colored_mask = np.zeros(num_points, dtype=bool)
+            for w_idx, wire in enumerate(all_confirmed):
+                w_lid = getattr(wire, 'line_id', w_idx + 1)
+                g_idx = getattr(wire, 'global_indices', np.array([], dtype=int))
+                if len(g_idx) == 0:
+                    continue
+                cr, cg, cb = line_color_map.get(w_lid, (65535, 20000, 0))
+                red[g_idx] = cr
+                green[g_idx] = cg
+                blue[g_idx] = cb
+                colored_mask[g_idx] = True
+
+            # 未在簇中明确标记但在 cable_pts_idx 中的点赋予默认橙红
+            unassigned_cables = np.setdiff1d(cable_pts_idx, np.where(colored_mask)[0])
+            if len(unassigned_cables) > 0:
+                red[unassigned_cables] = 65535
+                green[unassigned_cables] = 20000
+                blue[unassigned_cables] = 0
+        elif point_line_id is not None:
+            # 向后兼容旧格式：通过 point_line_id 与 find_line_func 逐点染色
+            for pt_idx in cable_pts_idx:
+                raw_id = point_line_id[pt_idx]
+                l_id = find_line_func(raw_id) if (find_line_func is not None and raw_id > 0) else raw_id
+                if l_id in line_color_map:
+                    cr, cg, cb = line_color_map[l_id]
+                    red[pt_idx] = cr
+                    green[pt_idx] = cg
+                    blue[pt_idx] = cb
+                else:
+                    red[pt_idx] = 65535
+                    green[pt_idx] = 20000
+                    blue[pt_idx] = 0
+        else:
+            red[cable_pts_idx] = 65535
+            green[cable_pts_idx] = 20000
+            blue[cable_pts_idx] = 0
     elif len(cable_pts_idx) > 0:
         red[cable_pts_idx] = 65535
         green[cable_pts_idx] = 20000
