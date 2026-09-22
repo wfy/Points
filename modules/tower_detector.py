@@ -418,14 +418,17 @@ def detect_towers(off_ground_pts: np.ndarray,
             shell_thick = shell0 * k_height
             margin_val = min(margin0 * k_height, 0.85) + 0.35  # 增加 0.35m 钢构角钢法兰外凸安装裕量，并设防膨胀上限
             
+            # 【ADR 0005 & Ticket 01: 塔身分界高程基准 (WaistBoundaryElevation)】
             if len(crossarm_candidate_z) == 0:
                 if not is_robust_lattice or h_true < 22.0:
                     continue
                 arm_ratio = float(np.clip(0.55 - 0.03 * (k_height - 1.0), 0.48, 0.60))
-                z_lowest_arm = max(h_true * arm_ratio, 5.0)
+                waist_boundary_z = max(h_true * arm_ratio, 5.0)
             else:
-                # 横担下沿基准线：最下层横担/跳线环切片中心向下偏移 1.5m（完整覆盖角钢下斜撑过渡与挂点金具，消除 126-127 偏高缺陷）
-                z_lowest_arm = max(float(min(crossarm_candidate_z)) - 1.5, 5.0)
+                # 严格锚定在最下层横担角钢及耐张跳线弧垂底端下方 1.5m 裕量处
+                # 确保所有下斜撑过渡角钢与跳线环金具 100% 纳入 UpperTowerBox
+                waist_boundary_z = max(float(min(crossarm_candidate_z)) - 1.5, 5.0)
+            z_lowest_arm = waist_boundary_z
 
             # 【阶段二核心优化：纯净塔身多层切片几何轴心自校准 (Pure Trunk Multi-Slice Centroid Recalibration)】
             # 彻底摒弃在包含悬臂横担与非对称导线的高位区间粗暴估算中心；
@@ -475,7 +478,7 @@ def detect_towers(off_ground_pts: np.ndarray,
                     w1_trunk, w2_trunk = 1.8 * np.sqrt(k_height), 1.8 * np.sqrt(k_height)
             w_waist = max(w1_trunk, w2_trunk)
             
-            # 【横担上部包络与地线支架】
+            # 【ADR 0005 & Ticket 02: 上半部定向矩形包围盒 (UpperTowerBox)】
             high_arm_zone = tower_z >= z_lowest_arm
             arm_pts = tower_pts[high_arm_zone]
 
@@ -483,7 +486,11 @@ def detect_towers(off_ground_pts: np.ndarray,
                 d1_high = d_v1[high_arm_zone]
                 d2_high = d_v2[high_arm_zone]
                 half_arm_w = min(max(np.percentile(d1_high, 99.5) * 1.18 + 1.2, 5.5), half_arm_max * 1.20)
-                half_line_t = min(max(np.percentile(d2_high, 98) * 1.25 + 0.8, 2.5), 4.8)
+                
+                # 跨电压等级顺线厚度自适应：基于横担展宽与塔高动态约束绝缘子串裕量
+                insulator_margin = min(0.18 * half_arm_w, 0.08 * h_true)
+                half_line_limit = (w2_trunk / 2.0) + max(insulator_margin, 1.8)
+                half_line_t = min(max(np.percentile(d2_high, 98) * 1.15 + 0.5, 2.5), max(half_line_limit, 3.5))
             else:
                 half_arm_w = half_arm_max * 1.15
                 half_line_t = 3.5
@@ -491,8 +498,8 @@ def detect_towers(off_ground_pts: np.ndarray,
             mask_high = high_arm_zone & (d_v1 <= half_arm_w) & (d_v2 <= half_line_t)
             top_bracket_mask = (tower_z >= (max_z - 4.5)) & (d_v1 <= (w_waist * 1.35 + 2.0)) & (d_v2 <= 3.8)
 
-            # 【阶段二优化 3：四棱台放坡候选与 3D 体素自适应连通生长】
-            # 从 z_lowest_arm 处的横担下腰正方形向下线性放坡延伸至塔基地面正方形
+            # 【ADR 0005 & Ticket 03: 下半部四棱台放坡包围盒 (LowerTowerFrustum)】
+            # 从 z_lowest_arm (WaistBoundaryElevation) 向下以真实物理放坡斜率线性延伸至塔基地面
             delta_z_all = np.maximum(z_lowest_arm - tower_z, 0.0)
             w1_allowed = w1_trunk + delta_z_all * max_slope_rate + margin_val
             w2_allowed = w2_trunk + delta_z_all * max_slope_rate + margin_val

@@ -64,3 +64,15 @@ _Avoid_: SpanSlice, SubCloud, CorridorBlock
 负责铁塔拓扑链路排序、走廊定向包围盒（OBB）几何投影切割与多档点云无损导出的深度计算模块。
 _Avoid_: SpanSplitter, CorridorManager, LasSlicer
 
+**UpperTowerBox**:
+覆盖输电线路铁塔塔头、多层横担及绝缘子串金具的定向三维紧致矩形体包围盒（OBB），以横担展宽主轴和顺线厚度为主轴，自适应适配跨电压等级绝缘子串长度。
+_Avoid_: UpperBoundingBox, TowerHeadCube, TopBox
+
+**LowerTowerFrustum**:
+自横担下沿基准线以物理放坡斜率向下延伸至塔脚基础的空间四棱截锥体包围盒，配合塔腰向下的三维骨架体素连通生长，实现塔腿角钢与地表林木的精准剥离。
+_Avoid_: LowerCone, TowerPyramid, BottomBox
+
+**WaistBoundaryElevation**:
+划分 UpperTowerBox 与 LowerTowerFrustum 的水平空间分界基准高程，严格定义在最下层横担及耐张跳线弧垂底端下方安全裕量处，阻断上部大包络对下部林木的误吞。
+_Avoid_: SplitHeight, CutPlane, TowerWaistZ
+
