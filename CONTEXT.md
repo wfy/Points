@@ -76,3 +76,11 @@ _Avoid_: LowerCone, TowerPyramid, BottomBox
 划分 UpperTowerBox 与 LowerTowerFrustum 的水平空间分界基准高程，严格定义在最下层横担及耐张跳线弧垂底端下方安全裕量处，阻断上部大包络对下部林木的误吞。
 _Avoid_: SplitHeight, CutPlane, TowerWaistZ
 
+**FrustumFirstAnchor**:
+以地表以上纯净四棱台角钢（4根主腿）为绝对物理基准，自底向上提取铁塔物理中心与外立面正交朝向，杜绝高空非对称横担与导线对塔心和朝向的拉偏。
+_Avoid_: TopDownCenter, SkyAnchor, AverageCentroid
+
+**PhysicalProportionGuard**:
+输电线路铁塔上下空间几何比例熔断机制，刚性约束最下层横担基准高程（WaistBoundaryElevation）不得低于全塔净高的 30%，且横担半宽必须相对于塔身立柱存在阶跃突变，阻断下塔身放坡角钢误判为横担。
+_Avoid_: RatioRule, HeightCheck, SanityClamp
+
