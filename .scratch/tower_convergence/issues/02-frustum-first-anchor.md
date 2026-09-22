@@ -1,13 +1,14 @@
-# 02: FrustumFirstAnchor 四棱台自底向上定姿与全塔单一刚体朝向锁定
+# 02: FrustumFirstAnchor 四棱台自底向上定姿与全塔单一刚体朝向锁定 (REVERTED)
 
-**What to build:** 在地面上方纯净四棱台区间（$z \in [0.15H, 0.40H]$）自底向上提取 4 根刚性主腿角钢，以 4 根主腿外围矩形对称中心作为铁塔唯一绝对中轴 $(c_x, c_y)$，彻底消除不对称横担对塔心的拉偏；以 4 根主腿外立面法向提取正交基准主轴 $(\vec{v}_1, \vec{v}_2)$，消除转角耐张塔（5-6#）因粗先验误锁定到 45° 对角线引发的菱形错位；上下两部分严格共享同一正交主轴，保证 UpperTowerBox 与 LowerTowerFrustum 朝向浑然一体。
+**What to build:** 在地面上方纯净四棱台区间自底向上提取 4 根刚性主腿角钢进行定姿。
+**Post-Evaluation finding:** 经实测，该方案的世界坐标系象限划分与强行正交立面绑定破坏了大部分正常铁塔的朝向，导致问题放大。
+**Action:** 根据用户明确指示，已于 2026-09-22 彻底撤销此项修改，恢复原生鲁棒的 RANSAC/PCA 朝向机制，保留 Q1 和 Q3 的有效修复。
 
 **Blocked by:** 01: PhysicalProportionGuard 物理几何比例熔断与横担阶跃检测
 
-**Status:** closed
+**Status:** reverted
 
-- [x] 实现 `extract_frustum_first_anchor` 函数，自底向上提取 4 根主腿中心与立面
-- [x] 锁定全塔统一物理轴心 $(c_x, c_y)$，杜绝高位非对称拉偏
-- [x] 锁定全塔正交外立面朝向 $(\vec{v}_1, \vec{v}_2)$，杜绝 45° 对角线倒挂（5-6# Tower 2 朝向成功锁定至 -90.4°/179.6°）
-- [x] UpperTowerBox 与 LowerTowerFrustum 严格共享此基准朝向
-- [x] 单元测试验证：验证非对称横担下中心稳定性与四立面正交性
+- [x] 撤销 `extract_frustum_first_anchor` 函数
+- [x] 恢复原生基于高空横担角钢 RANSAC 拟合的主轴朝向
+- [x] 恢复纯净塔身多层切片几何轴心自校准 (Pure Trunk Multi-Slice Centroid Recalibration)
+- [x] 验证 Q1 (紧致 OBB) 与 Q3 (30% 比例熔断) 保持完好且 61 项测试通过

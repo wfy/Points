@@ -225,6 +225,35 @@ def detect_towers(off_ground_pts: np.ndarray,
     valid_tower_entities: List[TowerEntity] = []
     
     if len(tower_candidates) > 0:
+        # 【走廊走向与横担正交基准 (Corridor Span & Arm Orthogonal Reference)】
+        # 在输电线路巡检中，走廊走向 u_span 与横担法向 u_arm 具有强先验几何正交性。
+        # 优先从初筛铁塔候选点集 (>= 2 座高塔) 的空间分布主轴中提取走廊先验基准：
+        u_span_prior = None
+        u_arm_prior = None
+        high_cands = [c for c in tower_candidates if c.get('max_z', 0.0) >= 20.0]
+        if len(high_cands) >= 2:
+            # 优先从相距 >= 45m 的真正跨档杆塔对提取走廊轴向，杜绝同一座铁塔旁的孤立树冠候选干扰走廊走向
+            max_dist = 0.0
+            best_pair = None
+            for i in range(len(high_cands)):
+                for j in range(i + 1, len(high_cands)):
+                    d = np.hypot(high_cands[i]['cx'] - high_cands[j]['cx'], high_cands[i]['cy'] - high_cands[j]['cy'])
+                    if d > max_dist:
+                        max_dist = d
+                        best_pair = (high_cands[i], high_cands[j])
+            if best_pair is not None and max_dist >= 45.0:
+                c1, c2 = best_pair
+                span_vec = np.array([c2['cx'] - c1['cx'], c2['cy'] - c1['cy']])
+                u_span_prior = span_vec / np.linalg.norm(span_vec)
+                u_arm_prior = np.array([-u_span_prior[1], u_span_prior[0]])
+            else:
+                cand_xy = np.array([[c['cx'], c['cy']] for c in high_cands])
+                span_vec = cand_xy[1] - cand_xy[0]
+                norm_span = np.linalg.norm(span_vec)
+                if norm_span > 1e-3:
+                    u_span_prior = span_vec / norm_span
+                    u_arm_prior = np.array([-u_span_prior[1], u_span_prior[0]])
+
         off_ground_tree = cKDTree(off_ground_pts[:, :2])
         for cand in tower_candidates:
             cx, cy, max_z = cand['cx'], cand['cy'], cand['max_z']
@@ -300,7 +329,7 @@ def detect_towers(off_ground_pts: np.ndarray,
             if not (has_cc_bottom and has_cc_top and max_cc_z_span >= max(max_z * 0.60, 16.0)):
                 continue
 
-            # 粗中心自校准（提供稳定的初始搜索基准）
+            # 初始中心校准
             waist_mask = (tower_z >= max_z * 0.45) & (tower_z <= max_z * 0.85) & (np.hypot(tower_pts[:, 0] - cx, tower_pts[:, 1] - cy) <= 8.0)
             if np.sum(waist_mask) >= 30:
                 w_pts = tower_pts[waist_mask]
@@ -325,8 +354,6 @@ def detect_towers(off_ground_pts: np.ndarray,
             if v_arm is not None and inlier_count >= 8:
                 v_a = v_arm
                 v_b = np.array([-v_a[1], v_a[0]])
-                # 铁塔具有严格正交双主轴：横担轴（跨度宽）与顺线走廊轴（跨度窄）
-                # 自动将上层展宽更大者赋给横担主轴 v1，顺线走廊轴赋给 v2
                 d_a = np.abs((lattice_arm_pts[:, :2] - np.array([cx, cy])) @ v_a)
                 d_b = np.abs((lattice_arm_pts[:, :2] - np.array([cx, cy])) @ v_b)
                 if np.percentile(d_b, 98) > np.percentile(d_a, 98):
@@ -343,7 +370,7 @@ def detect_towers(off_ground_pts: np.ndarray,
                     v2 = evecs_a[:, 0]
                 else:
                     v1, v2 = np.array([1.0, 0.0]), np.array([0.0, 1.0])
-                        
+
             d_v1 = np.abs(diff_all_tower @ v1)
             d_v2 = np.abs(diff_all_tower @ v2)
 
@@ -456,17 +483,17 @@ def detect_towers(off_ground_pts: np.ndarray,
             d_v2 = np.abs(diff_all_tower @ v2)
 
             # 【阶段二优化 2：精准测量塔身纯立柱半宽 (W_trunk)】
-            # 严格在最下横担下方 [z_lowest_arm - 3.5, z_lowest_arm - 0.5] 纯立柱区间测量，近轴限制 d <= 4.0m
+            # 严格在最下横担下方 [z_lowest_arm - 3.5, z_lowest_arm - 0.5] 纯立柱区间测量，近轴限制 d <= 3.8m
             # 此时以精准物理中轴为基准，测量值绝对平衡且纯净
-            waist_band = (tower_z >= max(z_lowest_arm - 3.5, 0.0)) & (tower_z <= max(z_lowest_arm - 0.5, 0.0)) & (d_v1 <= 4.0) & (d_v2 <= 4.0)
+            waist_band = (tower_z >= max(z_lowest_arm - 3.5, 0.0)) & (tower_z <= max(z_lowest_arm - 0.5, 0.0)) & (d_v1 <= 3.8) & (d_v2 <= 3.8)
             if np.sum(waist_band) >= 10:
-                w1_trunk = float(np.percentile(d_v1[waist_band], 90))
-                w2_trunk = float(np.percentile(d_v2[waist_band], 90))
+                w1_trunk = float(np.percentile(d_v1[waist_band], 98))
+                w2_trunk = float(np.percentile(d_v2[waist_band], 98))
             else:
-                clean_trunk_m = (tower_z >= max(z_lowest_arm - 4.0, 0.0)) & (tower_z <= z_lowest_arm) & (d_v1 <= 4.0) & (d_v2 <= 4.0)
+                clean_trunk_m = (tower_z >= max(z_lowest_arm - 4.0, 0.0)) & (tower_z <= z_lowest_arm) & (d_v1 <= 3.8) & (d_v2 <= 3.8)
                 if np.sum(clean_trunk_m) >= 5:
-                    w1_trunk = float(np.percentile(d_v1[clean_trunk_m], 90))
-                    w2_trunk = float(np.percentile(d_v2[clean_trunk_m], 90))
+                    w1_trunk = float(np.percentile(d_v1[clean_trunk_m], 98))
+                    w2_trunk = float(np.percentile(d_v2[clean_trunk_m], 98))
                 else:
                     w1_trunk, w2_trunk = 1.8 * np.sqrt(k_height), 1.8 * np.sqrt(k_height)
             w_waist = max(w1_trunk, w2_trunk)
