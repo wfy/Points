@@ -332,5 +332,134 @@ class TestTwoStageTowerConvergence(unittest.TestCase):
         # 验证 3: 严格正交性 (v1 . v2 == 0)
         self.assertAlmostEqual(float(abs(ent.v1 @ ent.v2)), 0.0, places=5)
 
+    def test_ticket01_waist_orthogonal_centroid_recalibration_resists_tree_bias(self):
+        """
+        Ticket 01: 验证单侧茂密树冠拉偏中轴场景下，塔腰正交物理对称中轴再校准能精确消除偏移
+        """
+        np.random.seed(101)
+        h = 36.0
+        n_trunk = 3500
+        zs = np.random.uniform(1.0, h, n_trunk)
+        base_w, top_w = 4.0, 1.6
+        w = base_w - (base_w - top_w) * (zs / h)
+        
+        # 旋转 30 度塔身
+        theta = np.radians(30.0)
+        R = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
+        legs = np.random.choice(4, n_trunk)
+        signs = [(-1, -1), (-1, 1), (1, -1), (1, 1)]
+        pts_local = np.zeros((n_trunk, 2))
+        for i, s in enumerate(signs):
+            m = (legs == i)
+            pts_local[m, 0] = s[0] * w[m] + np.random.normal(0, 0.05, np.sum(m))
+            pts_local[m, 1] = s[1] * w[m] + np.random.normal(0, 0.05, np.sum(m))
+        pts_trunk_2d = pts_local @ R.T
+
+        # 横担：在 z in [25.0, 29.0]m 处，半宽 7.5m
+        n_arm = 600
+        arm_z = np.random.uniform(25.0, 29.0, n_arm)
+        arm_y = np.random.uniform(-7.5, 7.5, n_arm)
+        arm_x = np.random.normal(0, 0.2, n_arm)
+        pts_arm_local = np.column_stack([arm_x, arm_y])
+        pts_arm_2d = pts_arm_local @ R.T
+
+        # 在铁塔一侧（x > 0 侧）制造极高密度的低位树冠点云（z in [2.0, 10.0]m, 距离塔心 2.5m~6m）
+        n_tree = 1200
+        tree_x = np.random.uniform(2.5, 6.0, n_tree)
+        tree_y = np.random.uniform(-3.0, 3.0, n_tree)
+        tree_z = np.random.uniform(2.0, 10.0, n_tree)
+        pts_tree_2d = np.column_stack([tree_x, tree_y])
+
+        all_2d = 1000.0 + np.vstack([pts_trunk_2d, pts_arm_2d, pts_tree_2d])
+        all_z = np.concatenate([zs, arm_z, tree_z])
+        pts = np.column_stack([all_2d, all_z])
+        rel_z = all_z.copy()
+        off_ground_idx = np.arange(len(pts))
+
+        is_tower, is_arm, is_near_arm, entities = detect_towers(
+            off_ground_pts=pts,
+            rel_z=rel_z,
+            off_ground_idx=off_ground_idx,
+            config=self.config
+        )
+
+        self.assertEqual(len(entities), 1)
+        ent = entities[0]
+
+        # 真实中心是 (1000.0, 1000.0)
+        err_dist = np.hypot(ent.cx - 1000.0, ent.cy - 1000.0)
+        # 未进行正交腰部对称校准前，单侧树冠会将中轴拉偏 > 0.8m
+        # 校准后误差应 < 0.25m
+        self.assertLess(err_dist, 0.25, f"塔腰正交中轴校准失败，残余中轴偏差过大: {err_dist:.3f}m")
+
+    def test_ticket02_tension_tower_adaptive_thickness_jumper_coverage(self):
+        """
+        Ticket 02: 验证耐张塔大弧垂跳线场景下，顺线厚度自适应放开至 5.5m~6.0m，100% 包含跳线
+        """
+        np.random.seed(202)
+        h = 40.0
+        n_trunk = 3000
+        zs = np.random.uniform(1.0, h, n_trunk)
+        base_w, top_w = 4.2, 1.8
+        w = base_w - (base_w - top_w) * (zs / h)
+        legs = np.random.choice(4, n_trunk)
+        signs = [(-1, -1), (-1, 1), (1, -1), (1, 1)]
+        pts_trunk_2d = np.zeros((n_trunk, 2))
+        for i, s in enumerate(signs):
+            m = (legs == i)
+            pts_trunk_2d[m, 0] = s[0] * w[m] + np.random.normal(0, 0.05, np.sum(m))
+            pts_trunk_2d[m, 1] = s[1] * w[m] + np.random.normal(0, 0.05, np.sum(m))
+
+        # 横担：沿 y 方向半宽 10m
+        n_arm = 800
+        arm_z = np.random.uniform(28.0, 32.0, n_arm)
+        arm_y = np.random.uniform(-10.0, 10.0, n_arm)
+        arm_x = np.random.normal(0, 0.3, n_arm)
+        pts_arm_2d = np.column_stack([arm_x, arm_y])
+
+        # 大弧垂跳线：顺线 (x 方向) 外展至 5.2m
+        n_jumper = 150
+        jumper_z = np.random.uniform(26.0, 30.0, n_jumper)
+        jumper_y = np.random.choice([-8.0, 8.0], n_jumper) + np.random.normal(0, 0.2, n_jumper)
+        jumper_x = np.random.uniform(3.5, 5.2, n_jumper)
+        pts_jumper_2d = np.column_stack([jumper_x, jumper_y])
+
+        # 跨中导线：顺线外伸至 x in [7.5, 30.0]
+        n_wire = 300
+        wire_z = np.random.uniform(29.0, 31.0, n_wire)
+        wire_y = np.random.choice([-8.0, 8.0], n_wire)
+        wire_x = np.random.uniform(7.5, 30.0, n_wire)
+        pts_wire_2d = np.column_stack([wire_x, wire_y])
+
+        all_2d = 500.0 + np.vstack([pts_trunk_2d, pts_arm_2d, pts_jumper_2d, pts_wire_2d])
+        all_z = np.concatenate([zs, arm_z, jumper_z, wire_z])
+        pts = np.column_stack([all_2d, all_z])
+        rel_z = all_z.copy()
+        off_ground_idx = np.arange(len(pts))
+
+        is_tower, is_arm, is_near_arm, entities = detect_towers(
+            off_ground_pts=pts,
+            rel_z=rel_z,
+            off_ground_idx=off_ground_idx,
+            config=self.config
+        )
+
+        self.assertEqual(len(entities), 1)
+        ent = entities[0]
+
+        # 验证 1：顺线半厚度已自适应放开至 > 5.0m
+        self.assertGreater(ent.half_l2, 5.0, f"耐张塔顺线厚度未能自适应放开: half_l2={ent.half_l2:.2f}m")
+
+        # 验证 2：5.2m 大弧垂跳线点捕获率 >= 85%
+        jumper_start = n_trunk + n_arm
+        jumper_end = jumper_start + n_jumper
+        jumper_cap = np.sum(is_tower[jumper_start:jumper_end])
+        self.assertGreater(jumper_cap / n_jumper, 0.85, f"耐张塔跳线捕获率不足: {jumper_cap}/{n_jumper}")
+
+        # 验证 3：>= 7.5m 跨中导线严禁被误判为杆塔 (误捕率 < 5%)
+        wire_start = jumper_end
+        wire_cap = np.sum(is_tower[wire_start:])
+        self.assertLess(wire_cap / n_wire, 0.05, f"跨中导线被错误包入杆塔: {wire_cap}/{n_wire}")
+
 if __name__ == '__main__':
     unittest.main()
