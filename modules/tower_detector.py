@@ -305,7 +305,15 @@ def detect_towers(off_ground_pts: np.ndarray,
             
             local_pts = off_ground_pts[indices]
             local_rel_z = rel_z[indices]
-            valid_mask = local_rel_z <= (max_z + 4.0)  # 容纳塔顶地线尖顶
+            abs_max_z = float(cand.get('abs_max_z', 0.0))
+            relief_margin = float(getattr(t_cfg, 'delta_h_relief', 8.0) * 2.0)
+            max_top_allowance = 8.0 + max(relief_margin, 12.0)
+            if abs_max_z > 0.0:
+                # 【ADR 0006 & Ticket 02: 陡坡塔顶绝对高程解耦防护 (Slope-Adaptive Absolute Z Gate)】
+                # 容纳猫头塔羊角高出塔身中轴(可达6~8m)以及山地陡坡下陷引起的相对高程膨胀(可达15m)
+                valid_mask = (local_pts[:, 2] <= (abs_max_z + 8.5)) & (local_rel_z <= (max_z + max_top_allowance))
+            else:
+                valid_mask = local_rel_z <= (max_z + max_top_allowance)
             valid_indices = np.array(indices)[valid_mask]
             tower_z = local_rel_z[valid_mask]
             tower_pts = local_pts[valid_mask]
@@ -634,7 +642,12 @@ def detect_towers(off_ground_pts: np.ndarray,
                 half_line_t = 3.2
 
             mask_high = high_arm_zone & (d_v1 <= half_arm_w) & (d_v2 <= half_line_t)
-            top_bracket_mask = (tower_z >= (max_z - 4.5)) & (d_v1 <= (w_waist * 1.35 + 2.0)) & (d_v2 <= half_line_t)
+            # 【ADR 0006 & Ticket 03: 猫头塔顶羊角与地线支架包围盒自适应放宽 (Cathead Horn Bracket Mask Expansion)】
+            top_arm_w = max(w_waist * 1.6 + 2.5, half_arm_w)
+            is_top_bracket_zone = (tower_z >= (max_z - 5.5))
+            if abs_max_z > 0.0:
+                is_top_bracket_zone = is_top_bracket_zone | (tower_pts[:, 2] >= (abs_max_z - 5.5))
+            top_bracket_mask = is_top_bracket_zone & (d_v1 <= top_arm_w) & (d_v2 <= half_line_t)
 
             # 【ADR 0005 & Ticket 03: 下半部四棱台放坡包围盒 (LowerTowerFrustum)】
             # 从 z_upper_floor (WaistBoundaryElevation) 向下以真实物理放坡斜率线性延伸至塔基地面
