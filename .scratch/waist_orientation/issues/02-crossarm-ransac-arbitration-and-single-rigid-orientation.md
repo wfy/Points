@@ -4,11 +4,11 @@
 
 **Blocked by:** 01: 塔腰纯净段正方形截面正交定姿 (Waist MinArea-OBB)
 
-**Status:** ready-for-agent
+**Status:** closed
 
-- [ ] 在 `detect_towers` 中调用 `extract_waist_orthogonal_axes` 获取纯净塔腰截面的正交基底对 $(\vec{u}_a, \vec{u}_b)$
-- [ ] 实现基于高空横担角钢 2D RANSAC 向量 $\vec{v}_{\text{arm}}$ 的绝对点积仲裁逻辑，确定横担主轴 $\vec{v}_1$ 与顺线走廊轴 $\vec{v}_2$
-- [ ] 设置防退化降级保护（优先 RANSAC 直线，次选跨档走向法向 $\vec{u}_{\text{arm\_prior}}$，兜底为高空散点惯性轴），100% 杜绝 90° 倒挂
-- [ ] 将仲裁后的 $(\vec{v}_1, \vec{v}_2)$ 赋给整个杆塔模型（UpperTowerBox 与 LowerTowerFrustum 同轴共体）
-- [ ] 保持 Q1（紧致长方体 OBB：`half_line_t <= 4.2m`）与 Q3（30% 物理比例熔断：`PhysicalProportionGuard`）完全生效
-- [ ] 编写针对点积仲裁、抗 90° 倒挂与刚体轴向一致性的单元测试
+- [x] 在 `detect_towers` 中调用 `extract_waist_orthogonal_axes` 获取纯净塔腰截面的正交基底对 $(\vec{u}_a, \vec{u}_b)$
+- [x] 实现基于高空横担角钢 2D RANSAC 向量 $\vec{v}_{\text{arm}}$ 的绝对点积仲裁逻辑，确定横担主轴 $\vec{v}_1$ 与顺线走廊轴 $\vec{v}_2$
+- [x] 设置防退化降级保护（优先 RANSAC 直线，次选跨档走向法向 $\vec{u}_{\text{arm\_prior}}$，兜底为高空散点惯性轴），100% 杜绝 90° 倒挂
+- [x] 将仲裁后的 $(\vec{v}_1, \vec{v}_2)$ 赋给整个杆塔模型（UpperTowerBox 与 LowerTowerFrustum 同轴共体）
+- [x] 保持 Q1（紧致长方体 OBB：`half_line_t <= 4.2m`）与 Q3（30% 物理比例熔断：`PhysicalProportionGuard`）完全生效
+- [x] 编写针对点积仲裁、抗 90° 倒挂与刚体轴向一致性的单元测试

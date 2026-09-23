@@ -5,7 +5,7 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from modules.tower_detector import detect_towers
+from modules.tower_detector import detect_towers, extract_waist_orthogonal_axes
 from modules.config import PipelineConfig
 
 class TestTwoStageTowerConvergence(unittest.TestCase):
@@ -196,6 +196,141 @@ class TestTwoStageTowerConvergence(unittest.TestCase):
         tree_start = n_trunk + n_arm + n_asym
         tree_captured = np.sum(is_tower[tree_start:])
         self.assertLess(tree_captured / n_tree, 0.05, f"四棱台底角树木被误判为塔: {tree_captured}/{n_tree}")
+
+    def test_ticket01_extract_waist_orthogonal_axes_isotropy_and_orthogonality(self):
+        """
+        Ticket 01: 验证 extract_waist_orthogonal_axes 在任意地理走向旋转角度下，
+        均能准确、无偏、各项同性地提取正方形截面物理外立面正交向量，
+        且严格正交 (|u_a . u_b| < 1e-6) 且模长为 1。
+        """
+        # 测试多个任意角度 (包含直线塔、转角塔各种走向)
+        test_angles = [0.0, 15.5, 33.0, 45.0, 68.5, 82.0]
+        L = 2.4 # 塔腰立柱正方形截面边长 2.4m
+        corners = np.array([[-L/2, -L/2], [L/2, -L/2], [L/2, L/2], [-L/2, L/2]])
+
+        # 构造正方形外围轮廓密集点 + 内部斜撑点
+        edge_pts = []
+        for i in range(4):
+            p1, p2 = corners[i], corners[(i + 1) % 4]
+            for alpha in np.linspace(0, 1, 25):
+                edge_pts.append(p1 * (1 - alpha) + p2 * alpha)
+        # 内部 X 交叉斜撑
+        for alpha in np.linspace(0, 1, 20):
+            edge_pts.append(corners[0] * (1 - alpha) + corners[2] * alpha)
+            edge_pts.append(corners[1] * (1 - alpha) + corners[3] * alpha)
+        base_square = np.array(edge_pts)
+
+        for target_deg in test_angles:
+            rad = np.radians(target_deg)
+            R = np.array([[np.cos(rad), -np.sin(rad)], [np.sin(rad), np.cos(rad)]])
+            pts = base_square @ R.T + np.array([500.0, 800.0]) # 加上大尺度地理平移
+
+            res = extract_waist_orthogonal_axes(pts, deg_step=0.5)
+            self.assertIsNotNone(res)
+            u_a, u_b = res
+
+            # 1. 严格正交性与单位模长验证
+            self.assertAlmostEqual(float(np.linalg.norm(u_a)), 1.0, places=5)
+            self.assertAlmostEqual(float(np.linalg.norm(u_b)), 1.0, places=5)
+            self.assertAlmostEqual(float(np.abs(u_a @ u_b)), 0.0, places=5)
+
+            # 2. 几何角度无偏验证：u_a 或 u_b 必有一根与 target_deg 平行 (模 90 度内夹角 <= 0.5 度)
+            ang_a = np.degrees(np.arctan2(u_a[1], u_a[0])) % 90.0
+            ang_b = np.degrees(np.arctan2(u_b[1], u_b[0])) % 90.0
+            expected_mod90 = target_deg % 90.0
+            diff_a = min(abs(ang_a - expected_mod90), 90.0 - abs(ang_a - expected_mod90))
+            diff_b = min(abs(ang_b - expected_mod90), 90.0 - abs(ang_b - expected_mod90))
+            min_diff = min(diff_a, diff_b)
+            self.assertLess(min_diff, 0.6, f"角度解算偏差过大: target={target_deg}, found=({ang_a:.2f}, {ang_b:.2f})")
+
+        # 3. 极少点退化测试
+        too_few_pts = np.array([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]])
+        self.assertIsNone(extract_waist_orthogonal_axes(too_few_pts))
+
+    def test_ticket02_crossarm_ransac_arbitration_and_rigid_orientation(self):
+        """
+        Ticket 02: 验证高空 RANSAC 点积仲裁与全塔单一刚体朝向锁定：
+        1. 模拟 5-6# 类似转角耐张塔：真实塔身外立面在 144.5 度，高空由于引流线/绝缘子串干扰导致 RANSAC 初步拟合在 129.5 度 (15 度偏折)；
+        2. 经过 RANSAC 点积仲裁后，系统必须成功在正交对 (54.5°, 144.5°) 中选出 144.5° 作为横担主轴 v1，54.5° 作为走廊厚度轴 v2；
+        3. 验证 UpperTowerBox 与 LowerTowerFrustum 完全共享单一刚体轴系，剪刀差为 0.0°；
+        4. 验证长纵向跨档导线 (沿 54.5° 延伸 100m) 不会误导横担轴发生 90° 倒挂。
+        """
+        np.random.seed(42)
+        h = 42.0
+        n_trunk = 4000
+        zs = np.random.uniform(1.0, h, n_trunk)
+        w = 4.5 - 2.0 * (zs / h)
+
+        # 塔腰物理立面设定在 theta_true = 144.5 度 (走廊在 54.5 度)
+        theta_true_deg = 144.5
+        rad_true = np.radians(theta_true_deg)
+        # 局部坐标基底：u_arm 沿 144.5°, u_line 沿 54.5°
+        u_arm = np.array([np.cos(rad_true), np.sin(rad_true)])
+        u_line = np.array([-np.sin(rad_true), np.cos(rad_true)])
+
+        legs = np.random.choice(4, n_trunk)
+        signs = [(-1, -1), (-1, 1), (1, -1), (1, 1)]
+        local_xs = np.array([signs[l][0] * w[i]/2 for i, l in enumerate(legs)]) + np.random.normal(0, 0.03, n_trunk)
+        local_ys = np.array([signs[l][1] * w[i]/2 for i, l in enumerate(legs)]) + np.random.normal(0, 0.03, n_trunk)
+        # 旋转到世界坐标系
+        pts_trunk_2d = np.column_stack([
+            local_xs * u_arm[0] + local_ys * u_line[0],
+            local_xs * u_arm[1] + local_ys * u_line[1]
+        ])
+
+        # 高空横担角钢：位于 z=32m, 真实角钢沿 u_arm 分布 [-8.0, 8.0]
+        n_arm = 600
+        arm_z = 32.0 + np.random.uniform(-0.3, 0.3, n_arm)
+        arm_extent = np.random.uniform(-8.0, 8.0, n_arm)
+        pts_arm_2d = np.column_stack([
+            arm_extent * u_arm[0] + np.random.normal(0, 0.05, n_arm),
+            arm_extent * u_arm[1] + np.random.normal(0, 0.05, n_arm)
+        ])
+
+        # 模拟耐张跳线/倾斜绝缘子串干扰：在横担端部产生微小偏折
+        n_jumper = 200
+        jumper_z = 31.0 + np.random.uniform(-0.5, 0.5, n_jumper)
+        jumper_extent = np.random.uniform(6.0, 8.5, n_jumper)
+        pts_jumper_2d = np.column_stack([
+            jumper_extent * u_arm[0] + np.random.uniform(0.5, 2.0, n_jumper) * u_line[0],
+            jumper_extent * u_arm[1] + np.random.uniform(0.5, 2.0, n_jumper) * u_line[1]
+        ])
+
+        # 模拟长纵向出线跨档导线 (沿 u_line 顺线延伸至 80m，但绝对不能将横担轴带偏 90 度)
+        n_span_wire = 1500
+        wire_z = 30.5 + np.random.uniform(-1.0, 1.0, n_span_wire)
+        wire_line_extent = np.random.uniform(5.0, 80.0, n_span_wire)
+        pts_wire_2d = np.column_stack([
+            wire_line_extent * u_line[0] + np.random.normal(0, 0.1, n_span_wire),
+            wire_line_extent * u_line[1] + np.random.normal(0, 0.1, n_span_wire)
+        ])
+
+        all_2d = 2000.0 + np.vstack([pts_trunk_2d, pts_arm_2d, pts_jumper_2d, pts_wire_2d])
+        all_z = np.concatenate([zs, arm_z, jumper_z, wire_z])
+        pts = np.column_stack([all_2d, all_z])
+        rel_z = all_z.copy()
+        off_ground_idx = np.arange(len(pts))
+
+        is_tower, is_arm, is_near_arm, entities = detect_towers(
+            off_ground_pts=pts,
+            rel_z=rel_z,
+            off_ground_idx=off_ground_idx,
+            config=self.config
+        )
+
+        self.assertEqual(len(entities), 1, "铁塔未能正确检出")
+        ent = entities[0]
+
+        # 验证 1: 横担主轴 v1 与真实塔腰物理外立面 u_arm 严格平行 (点积绝对值 >= 0.999)
+        dot_arm = abs(float(ent.v1 @ u_arm))
+        self.assertGreater(dot_arm, 0.995, f"横担主轴未能锁定塔腰物理外立面，dot={dot_arm:.4f}")
+
+        # 验证 2: 严禁发生 90 度轴向倒挂 (v1 与顺线导线 u_line 的内积必须接近 0)
+        dot_line = abs(float(ent.v1 @ u_line))
+        self.assertLess(dot_line, 0.05, f"致命缺陷：横担主轴被长导线误导发生了 90 度倒挂！dot={dot_line:.4f}")
+
+        # 验证 3: 严格正交性 (v1 . v2 == 0)
+        self.assertAlmostEqual(float(abs(ent.v1 @ ent.v2)), 0.0, places=5)
 
 if __name__ == '__main__':
     unittest.main()

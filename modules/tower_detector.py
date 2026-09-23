@@ -36,6 +36,48 @@ def fit_arm_ransac_2d(pts_2d: np.ndarray, max_trials: int = 100, inlier_thresh: 
             
     return best_direction, best_inliers_count
 
+def extract_waist_orthogonal_axes(
+    waist_pts_2d: np.ndarray,
+    deg_step: float = 0.5
+) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """
+    基于 2D MinArea-OBB (最小外接矩形面积旋转扫描) 提取塔腰纯净截面的严格物理正交基底对 (u_a, u_b)。
+    对于正方形截面，外接包络面积在四边与旋转轴平行时取全局极小值 L^2，在 45° 对角线时取极大值 2L^2。
+    在 [0, 90°) 范围内以 deg_step 步长扫描，不受世界绝对坐标系或象限先验的束缚，满足各向同性。
+
+    参数:
+        waist_pts_2d: shape (N, 2) 的塔腰 2D 点坐标
+        deg_step: 角度搜索步长，默认 0.5 度
+    返回:
+        (u_a, u_b): 相互严格正交的单位方向向量对 (shape: (2,))，若点数不足 (N < 8) 则返回 None
+    """
+    if waist_pts_2d is None or len(waist_pts_2d) < 8:
+        return None
+
+    deg = np.arange(0.0, 90.0, deg_step)
+    rad = np.radians(deg)
+    cos_t = np.cos(rad)
+    sin_t = np.sin(rad)
+    
+    # 构造旋转基底矩阵: U1 对应角度 theta 的主轴, U2 对应垂直轴
+    U1 = np.vstack([cos_t, sin_t])       # shape (2, len(deg))
+    U2 = np.vstack([-sin_t, cos_t])      # shape (2, len(deg))
+    
+    # 批量投影计算两轴展宽 (使用 2% 与 98% 分位数排除离群噪点)
+    proj1 = waist_pts_2d @ U1            # shape (N, len(deg))
+    proj2 = waist_pts_2d @ U2            # shape (N, len(deg))
+    
+    w1 = np.percentile(proj1, 98.0, axis=0) - np.percentile(proj1, 2.0, axis=0)
+    w2 = np.percentile(proj2, 98.0, axis=0) - np.percentile(proj2, 2.0, axis=0)
+    
+    areas = w1 * w2
+    best_idx = int(np.argmin(areas))
+    
+    u_a = np.array([cos_t[best_idx], sin_t[best_idx]])
+    u_b = np.array([-sin_t[best_idx], cos_t[best_idx]])
+    
+    return u_a, u_b
+
 def cluster_tower_voxels(off_ground_pts: np.ndarray, 
                          rel_z: np.ndarray, 
                          t_grid_size: float = 2.0,
@@ -479,6 +521,28 @@ def detect_towers(off_ground_pts: np.ndarray,
 
             # 依据精准物理中轴重新度量全塔横担与顺线走廊距离
             diff_all_tower = tower_pts[:, :2] - np.array([cx, cy])
+
+            # 【ADR 0006 & Ticket 02: 塔腰纯净截面正交定姿与高空横担角钢 RANSAC 点积仲裁】
+            # 1. 提取蓝黄分割线下方纯净塔腰截面点云 [z_lowest_arm - 3.5, z_lowest_arm - 0.5]，近轴限径 4.0m
+            waist_slice_m = (tower_z >= max(z_lowest_arm - 3.5, 0.0)) & (tower_z <= max(z_lowest_arm - 0.5, 0.0)) & (np.hypot(diff_all_tower[:, 0], diff_all_tower[:, 1]) <= 4.0)
+            if np.sum(waist_slice_m) < 15:
+                waist_slice_m = (tower_z >= max(z_lowest_arm - 4.5, 0.0)) & (tower_z <= max(z_lowest_arm, 0.0)) & (np.hypot(diff_all_tower[:, 0], diff_all_tower[:, 1]) <= 4.5)
+
+            waist_pts_raw = diff_all_tower[waist_slice_m]
+            waist_axes = extract_waist_orthogonal_axes(waist_pts_raw, deg_step=0.5)
+            if waist_axes is not None:
+                u_a, u_b = waist_axes
+                # 2. 仲裁参考向量：优先高位金属角钢 2D RANSAC 拟合向量 v_arm，兜底使用初始横担轴 v1
+                ref_arm = v_arm if (v_arm is not None and inlier_count >= 8) else v1
+                dot_a = abs(float(u_a @ ref_arm))
+                dot_b = abs(float(u_b @ ref_arm))
+                if dot_a >= dot_b:
+                    v1 = u_a
+                    v2 = np.array([-v1[1], v1[0]])
+                else:
+                    v1 = u_b
+                    v2 = np.array([-v1[1], v1[0]])
+
             d_v1 = np.abs(diff_all_tower @ v1)
             d_v2 = np.abs(diff_all_tower @ v2)
 

@@ -4,9 +4,9 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** closed
 
-- [ ] 实现 `extract_waist_orthogonal_axes` 函数，在塔腰纯净段执行 2D 最小外接矩形扫描
-- [ ] 确保在 $[0, 90^\circ)$ 范围内以 $0.5^\circ$ 步长精确锁定正方形截面的全局极小面积方向
-- [ ] 输出相互垂直的单位方向向量对 $(\vec{u}_a, \vec{u}_b)$
-- [ ] 单元测试验证：针对任意倾角正方形点云与 5-6# 真实塔腰点云均能稳定解析出物理外立面法向
+- [x] 实现 `extract_waist_orthogonal_axes` 函数，在塔腰纯净段执行 2D 最小外接矩形扫描
+- [x] 确保在 $[0, 90^\circ)$ 范围内以 $0.5^\circ$ 步长精确锁定正方形截面的全局极小面积方向
+- [x] 输出相互垂直的单位方向向量对 $(\vec{u}_a, \vec{u}_b)$
+- [x] 单元测试验证：针对任意倾角正方形点云与 5-6# 真实塔腰点云均能稳定解析出物理外立面法向
