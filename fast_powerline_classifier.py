@@ -10,7 +10,7 @@ import laspy
 from modules.config import PipelineConfig, DEFAULT_CONFIG, PipelineStage
 from modules.pipeline_executor import PipelineExecutor
 from modules.corridor_cutter import split_raw_corridor
-from modules.gui import select_file_gui
+from modules.gui import select_file_gui, select_files_gui
 from modules.viewer import get_viewer
 
 def fast_classify_and_color_powerline(las_input_path: str, 
@@ -137,8 +137,8 @@ def run_auto_span_pipeline(las_input_path: str, config: PipelineConfig = None) -
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="激光点云电力线分类与杆塔提取系统")
-    parser.add_argument("--input", "-i", type=str, help="输入 LAS 文件路径")
-    parser.add_argument("--output", "-o", type=str, help="输出 LAS 文件路径")
+    parser.add_argument("--input", "-i", type=str, nargs="+", help="输入 LAS 文件路径 (支持传入多个文件或通配符)")
+    parser.add_argument("--output", "-o", type=str, help="输出 LAS 文件路径 (多文件处理时可传入输出目录)")
     parser.add_argument("--no-gui", action="store_true", help="禁用 GUI 选择框")
     parser.add_argument("--no-qtmodeler", action="store_true", help="禁用处理完成后的 QTModeler 自动可视化")
     parser.add_argument("--force-kill-viewer", action="store_true", help="强制关闭后台运行的 QTModeler 线程")
@@ -181,35 +181,95 @@ if __name__ == "__main__":
         run_batch_directory(args.batch_dir, config=cfg)
         sys.exit(0)
 
-    # 2. 单文件/GUI 输入处理
-    INPUT_LAS = args.input
-    if not INPUT_LAS and not args.no_gui:
-        print("正在打开 Windows 文件选择对话框...")
-        INPUT_LAS = select_file_gui()
+    # 2. 收集待处理点云文件列表 (支持 CLI 多参、通配符展开或 GUI 多选)
+    input_files: List[str] = []
+    if args.input:
+        for item in args.input:
+            if '*' in item or '?' in item:
+                matched = glob.glob(item)
+                input_files.extend([os.path.abspath(m) for m in matched if os.path.exists(m)])
+            elif os.path.exists(item):
+                input_files.append(os.path.abspath(item))
+            else:
+                print(f"[Warning] 指定的文件不存在: '{item}'")
+    elif not args.no_gui:
+        print("正在打开 Windows 文件选择对话框 (支持按住 Ctrl / Shift 多选)...")
+        input_files = select_files_gui()
 
-    if INPUT_LAS and os.path.exists(INPUT_LAS):
+    if not input_files:
+        print("未选择或指定任何待处理文件，操作已取消。")
+        sys.exit(0)
+
+    # 3. 调度处理流程：单文件 vs 多文件批量排队
+    if len(input_files) == 1:
+        single_input = input_files[0]
         # 模式 A: 纯切片预处理 (--split-only)
         if args.split_only:
-            split_raw_corridor(INPUT_LAS, config=cfg)
+            split_raw_corridor(single_input, config=cfg)
             sys.exit(0)
             
         # 模式 B: 一键端到端先切后算 (--auto-span-pipeline)
         if args.auto_span_pipeline:
-            run_auto_span_pipeline(INPUT_LAS, config=cfg)
+            run_auto_span_pipeline(single_input, config=cfg)
             sys.exit(0)
 
         # 模式 C: 标准分类模式 (支持单档或整段)
         if args.output:
             OUTPUT_LAS = args.output
         else:
-            base_name = os.path.splitext(INPUT_LAS)[0]
+            base_name = os.path.splitext(single_input)[0]
             OUTPUT_LAS = f"{base_name}_sign.las"
             
-        out_path = fast_classify_and_color_powerline(INPUT_LAS, OUTPUT_LAS, config=cfg)
+        out_path = fast_classify_and_color_powerline(single_input, OUTPUT_LAS, config=cfg)
         if cfg.export.open_qtmodeler:
             get_viewer(cfg.export).open(out_path)
-            
-    elif not INPUT_LAS:
-        print("未选择任何文件，操作已取消。")
     else:
-        print(f"选择的文件不存在: {INPUT_LAS}")
+        # 多文件批量排队处理模式
+        print(f"\n========================================================")
+        print(f"  [多文件批量处理模式] 共选中待处理档段文件: {len(input_files)} 份")
+        print(f"========================================================")
+
+        t_batch_start = time.time()
+        success_count = 0
+        first_success_out = None
+
+        # 若用户通过 -o 指定了输出目录，则将结果统一写入该目录；若指定了单个文件名，则警告并自动回退为各文件同名规则
+        output_dir = None
+        if args.output:
+            if os.path.isdir(args.output):
+                output_dir = args.output
+            else:
+                print(f"[Warning] 多文件批量处理时 -o/--output 参数 '{args.output}' 为单个文件名，为防同名覆盖，将自动按各自文件名规则输出成果。")
+
+        for idx, fpath in enumerate(input_files, 1):
+            fname = os.path.basename(fpath)
+            print(f"\n>>> [{idx}/{len(input_files)}] 正在处理: '{fname}'")
+            try:
+                if args.split_only:
+                    split_raw_corridor(fpath, config=cfg)
+                elif args.auto_span_pipeline:
+                    classified_spans = run_auto_span_pipeline(fpath, config=cfg)
+                    if first_success_out is None and len(classified_spans) > 0:
+                        first_success_out = classified_spans[0]
+                else:
+                    base_name = os.path.splitext(fname)[0]
+                    if output_dir:
+                        out_path = os.path.join(output_dir, f"{base_name}_sign.las")
+                    else:
+                        dir_name = os.path.dirname(fpath)
+                        out_path = os.path.join(dir_name, f"{base_name}_sign.las")
+                    actual_out = fast_classify_and_color_powerline(fpath, out_path, config=cfg)
+                    if first_success_out is None:
+                        first_success_out = actual_out
+                success_count += 1
+            except Exception as e:
+                print(f"[Error] 处理文件 '{fname}' 发生异常: {e}")
+
+        total_batch_time = time.time() - t_batch_start
+        print(f"\n========================================================")
+        print(f"  [多文件处理完成] 成功处理: {success_count}/{len(input_files)} 份 | 总耗时: {total_batch_time:.2f} 秒")
+        print(f"========================================================")
+
+        if first_success_out and cfg.export.open_qtmodeler:
+            get_viewer(cfg.export).open(first_success_out)
+

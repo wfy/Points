@@ -3,7 +3,7 @@ import time
 import colorsys
 import numpy as np
 import laspy
-from typing import Optional, Set, Any
+from typing import Optional, Set, Any, List
 from modules.config import ClassificationCode
 
 def close_qtmodeler() -> bool:
@@ -20,6 +20,12 @@ def select_file_gui(*args, **kwargs) -> Optional[str]:
     """[DEPRECATED] 打开文件选择 GUI 对话框。请使用 modules.gui.select_file_gui()"""
     from modules.gui import select_file_gui as _select_file_gui
     return _select_file_gui(*args, **kwargs)
+
+def select_files_gui(*args, **kwargs) -> List[str]:
+    """[DEPRECATED] 打开多文件选择 GUI 对话框。请使用 modules.gui.select_files_gui()"""
+    from modules.gui import select_files_gui as _select_files_gui
+    return _select_files_gui(*args, **kwargs)
+
 
 def get_safe_output_path(target_path: str) -> str:
     """

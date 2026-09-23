@@ -11,7 +11,7 @@ from modules.tower_detector import detect_towers
 from modules.powerline_extractor import extract_and_track_powerlines
 from modules.topology_validator import validate_tower_topology
 from modules.corridor_cutter import CorridorCutter, order_towers_along_line, cut_corridors_by_spans, export_split_spans, split_raw_corridor
-from modules.gui import select_file_gui
+from modules.gui import select_file_gui, select_files_gui
 from modules.viewer import ViewerHandler, QTModelerViewer, SystemDefaultViewer, NullViewer, get_viewer, find_qtmodeler
 from modules.utils import open_in_qtmodeler, export_colored_las
 from modules.evaluator import PointCloudEvaluator, print_evaluation_report
@@ -43,6 +43,7 @@ __all__ = [
     'export_split_spans',
     'split_raw_corridor',
     'select_file_gui',
+    'select_files_gui',
     'ViewerHandler',
     'QTModelerViewer',
     'SystemDefaultViewer',
