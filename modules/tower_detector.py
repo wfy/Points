@@ -458,10 +458,13 @@ def detect_towers(off_ground_pts: np.ndarray,
                 w_thick = min(w1, w2)
                 outer_pts_count = np.sum((d_v1_slice >= (min_arm_span - 0.5)) | (d_v2_slice >= (min_arm_span - 0.5)))
 
+                # 耐张塔大翼展水平绝缘子串/跳线厚度自适应放宽：
+                # 当横向翼展显著 (w1 >= max(w_trunk_est + 3.0, 7.5)) 且具备清晰横线比 (w1 >= 2.0 * w2) 时，顺线厚度上限放宽至 5.5m，杜绝耐张塔绝缘子串被卡死
+                allowed_thick = 5.5 if (w1 >= max(w_trunk_est + 3.0, 7.5) and w1 >= 2.0 * max(w2, 0.5)) else max_arm_thick
                 # 真实横担角钢必须显著沿横担轴向 v1 展开 (w1 明显大于躯干且相对顺线厚度具备清晰长宽比，顺线厚度受限)
-                is_beam = (w1 >= max(w_trunk_est + 1.5, min_arm_span)) and (w1 >= min_arm_aspect * max(w2, 0.5)) and (w2 <= max_arm_thick) and (outer_pts_count >= 8)
-                # 耐张跳线仅存在于高位横担下方附近区间 (>= 0.65 * max_z)，绝不可能悬垂在接近地面的低空树冠处
-                is_tension_jumper = (w1 >= 5.5) and (w2 >= 5.5) and (outer_pts_count >= 50) and (w_span >= max(w_trunk_est + 3.0, 7.0)) and (z_c >= max_z * 0.65)
+                is_beam = (w1 >= max(w_trunk_est + 1.5, min_arm_span)) and (w1 >= min_arm_aspect * max(w2, 0.5)) and (w2 <= allowed_thick) and (outer_pts_count >= 8)
+                # 耐张跳线/串判定门槛：消减断层死区，当 w1 >= 5.0, w2 >= 4.5 时亦可注册为高位跳线候选
+                is_tension_jumper = (w1 >= 5.0) and (w2 >= 4.5) and (outer_pts_count >= 40) and (w_span >= max(w_trunk_est + 3.0, 7.0)) and (z_c >= max_z * 0.60)
                 
                 if is_beam or is_tension_jumper:
                     raw_candidates_z.append(z_c)
@@ -639,8 +642,29 @@ def detect_towers(off_ground_pts: np.ndarray,
             if len(arm_pts) >= 5:
                 d1_high = d_v1[high_arm_zone]
                 d2_high = d_v2[high_arm_zone]
-                # 紧致横担半宽：采用 99 分位数加 0.35m 安全安装公差，取消 18% 过度外推
-                half_arm_w = min(max(np.percentile(d1_high, 99.0) + 0.35, 5.5), half_arm_max * 1.10)
+
+                # 【Ticket 02: 铁塔横担双侧物理对称性仲裁 (Bilateral Symmetry Arbitration)】
+                # 分别度量横担左翼与右翼独立展宽，防止单侧向上隆起的边坡树木拉偏 half_arm_w
+                p1_signed = (tower_pts[high_arm_zone, :2] - np.array([cx, cy])) @ v1
+                p1_pos = p1_signed[p1_signed > (w_waist + 0.3)]
+                p1_neg = p1_signed[p1_signed < -(w_waist + 0.3)]
+                
+                w_r = float(np.percentile(p1_pos, 98.5)) if len(p1_pos) >= 15 else 0.0
+                w_l = float(np.percentile(-p1_neg, 98.5)) if len(p1_neg) >= 15 else 0.0
+                
+                if w_r > 0.0 and w_l > 0.0:
+                    w_min = min(w_r, w_l)
+                    w_max = max(w_r, w_l)
+                    # 真实铁塔横担两侧具备刚性双侧对称设计先验。若单侧展宽显著超出对侧（例如单侧边坡树木拉偏），以洁净侧翼展约束
+                    if w_max > (w_min * 1.25 + 0.5):
+                        w_sym_cap = w_min * 1.05 + 0.3
+                    else:
+                        w_sym_cap = w_max
+                    half_arm_raw = w_sym_cap + 0.35
+                else:
+                    half_arm_raw = np.percentile(d1_high, 99.0) + 0.35
+
+                half_arm_w = min(max(half_arm_raw, 4.5), half_arm_max * 1.10)
                 
                 # 【Ticket 02: 动态识别耐张塔与直线塔，放开耐张塔跳线/耐张串厚度】
                 p95_v2 = float(np.percentile(d2_high, 95.0))
@@ -661,7 +685,49 @@ def detect_towers(off_ground_pts: np.ndarray,
                 half_arm_w = half_arm_max * 1.05
                 half_line_t = 3.2
 
-            mask_high = high_arm_zone & (d_v1 <= half_arm_w) & (d_v2 <= half_line_t)
+            mask_high_box = high_arm_zone & (d_v1 <= half_arm_w) & (d_v2 <= half_line_t)
+            
+            # 【Ticket 02: 上半部定向盒 3D 体素空间连通性过滤 (UpperTowerBox 3D CC)】
+            # 针对直线塔以塔身立柱为种子向外 BFS 连通，过滤掉落在包围盒边缘但与铁塔空间断开的边坡悬空孤立树斑
+            # （耐张塔顺线大弧垂跳线已由顺线上限 half_line_t <= 6.0m 严密阻断跨中导线，保留全部跳线点云）
+            trunk_seed_m = high_arm_zone & (d_v1 <= (w_waist + 0.8)) & (d_v2 <= (w_waist + 0.8))
+            if (not is_tension_tower) and (np.sum(trunk_seed_m) >= 5) and (np.sum(mask_high_box) >= 15):
+                sub_high_pts = tower_pts[mask_high_box]
+                v_size_h = 0.50
+                v_coords_h = (sub_high_pts / v_size_h).astype(np.int32)
+                u_vh, inv_vh = np.unique(v_coords_h, axis=0, return_inverse=True)
+                
+                # 寻找落在 trunk_seed 范围内的种子体素
+                seed_in_box_m = (d_v1[mask_high_box] <= (w_waist + 0.8)) & (d_v2[mask_high_box] <= (w_waist + 0.8))
+                seed_vh_ids = np.unique(inv_vh[seed_in_box_m])
+                
+                if len(seed_vh_ids) > 0:
+                    v_tree_h = cKDTree(u_vh * v_size_h)
+                    pairs_h = v_tree_h.query_pairs(r=1.20)
+                    adj_h = {}
+                    for u, v in pairs_h:
+                        adj_h.setdefault(u, []).append(v)
+                        adj_h.setdefault(v, []).append(u)
+                        
+                    visited_h = np.zeros(len(u_vh), dtype=bool)
+                    q_h = deque(seed_vh_ids)
+                    for s in seed_vh_ids: visited_h[s] = True
+                    while q_h:
+                        curr = q_h.popleft()
+                        for nbr in adj_h.get(curr, []):
+                            if not visited_h[nbr]:
+                                visited_h[nbr] = True
+                                q_h.append(nbr)
+                                
+                    conn_high_pts = visited_h[inv_vh]
+                    mask_high = np.zeros(len(tower_pts), dtype=bool)
+                    high_box_indices = np.where(mask_high_box)[0]
+                    mask_high[high_box_indices[conn_high_pts]] = True
+                else:
+                    mask_high = mask_high_box
+            else:
+                mask_high = mask_high_box
+
             # 【ADR 0006 & Ticket 03: 猫头塔顶羊角与地线支架包围盒自适应放宽 (Cathead Horn Bracket Mask Expansion)】
             top_arm_w = max(w_waist * 1.6 + 2.5, half_arm_w)
             is_top_bracket_zone = (tower_z >= (max_z - 5.5))
