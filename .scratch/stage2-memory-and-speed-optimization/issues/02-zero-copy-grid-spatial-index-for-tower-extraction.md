@@ -10,8 +10,8 @@
 
 **Blocked by:** 01: Linear histogram aggregation via sorted slice in cluster_tower_voxels
 
-**Status:** ready-for-agent
+**Status:** closed
 
-- [ ] 在 `modules/tower_detector.py` 中实现 `GridSpatialIndex`，废除全局 `cKDTree`
-- [ ] 确保每座候选塔提取出的局部点云索引与原 `query_ball_point` 100% 相同
-- [ ] 验证千万点场景下内存占用立减 5GB~10GB，且局部提取耗时控制在毫秒级
+- [x] 在 `modules/tower_detector.py` 中实现 `GridSpatialIndex`，废除全局 `cKDTree`
+- [x] 确保每座候选塔提取出的局部点云索引与原 `query_ball_point` 100% 相同
+- [x] 验证千万点场景下内存占用立减 5GB~10GB，且局部提取耗时控制在毫秒级

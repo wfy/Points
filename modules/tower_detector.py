@@ -1,6 +1,6 @@
 import numpy as np
 from scipy.spatial import cKDTree
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Union
 from collections import deque
 from modules.models import TowerEntity
 from modules.config import PipelineConfig, DEFAULT_CONFIG
@@ -78,6 +78,53 @@ def extract_waist_orthogonal_axes(
     
     return u_a, u_b
 
+class GridSpatialIndex:
+    """
+    【ADR 0007: 二维网格空间分桶索引 (GridSpatialIndex)】
+    用于替代全图级数千万/上亿非地面点的 cKDTree，杜绝 5GB~10GB 的巨量 C++ 树节点内存常驻，
+    通过网格桶粗查 + 精确欧氏距离过滤，以极低内存开销（~100MB）完成候选塔圆形包围域的 100% 逐点等价检出。
+    """
+    def __init__(self, pts_2d: np.ndarray, cell_size: float = 16.0):
+        self.pts_2d = pts_2d
+        self.cell_size = float(cell_size)
+        gx = (pts_2d[:, 0] / self.cell_size).astype(np.int32)
+        gy = (pts_2d[:, 1] / self.cell_size).astype(np.int32)
+        min_gx, min_gy = int(np.min(gx)), int(np.min(gy))
+        self.min_gx, self.min_gy = min_gx, min_gy
+        self.n_gy = int(np.max(gy) - min_gy + 1)
+        codes = (gx - min_gx).astype(np.int64) * self.n_gy + (gy - min_gy).astype(np.int64)
+        
+        order = np.argsort(codes)
+        self.order = order
+        sorted_codes = codes[order]
+        unique_c, split_idx = np.unique(sorted_codes, return_index=True)
+        self.split_idx = np.append(split_idx, len(sorted_codes))
+        self.cell_to_slice = {int(c): i for i, c in enumerate(unique_c)}
+
+    def query_radius(self, center: Union[Tuple[float, float], List[float], np.ndarray], r: float) -> np.ndarray:
+        c_x, c_y = float(center[0]), float(center[1])
+        min_gx = int(np.floor((c_x - r) / self.cell_size))
+        max_gx = int(np.floor((c_x + r) / self.cell_size))
+        min_gy = int(np.floor((c_y - r) / self.cell_size))
+        max_gy = int(np.floor((c_y + r) / self.cell_size))
+        
+        cand_indices = []
+        for gx in range(min_gx, max_gx + 1):
+            for gy in range(min_gy, max_gy + 1):
+                code = (gx - self.min_gx) * self.n_gy + (gy - self.min_gy)
+                idx = self.cell_to_slice.get(code)
+                if idx is not None:
+                    cand_indices.append(self.order[self.split_idx[idx]:self.split_idx[idx+1]])
+                    
+        if len(cand_indices) == 0:
+            return np.array([], dtype=int)
+            
+        cands = np.concatenate(cand_indices)
+        pts = self.pts_2d[cands]
+        dist_sq = (pts[:, 0] - c_x)**2 + (pts[:, 1] - c_y)**2
+        return cands[dist_sq <= (r * r)]
+
+
 def cluster_tower_voxels(off_ground_pts: np.ndarray, 
                          rel_z: np.ndarray, 
                          t_grid_size: float = 2.0,
@@ -113,16 +160,34 @@ def cluster_tower_voxels(off_ground_pts: np.ndarray,
         return []
         
     candidate_tower_indices = []
-    mask_pts_in_valid = np.isin(inv_2d, valid_grid_idx)
-    sub_inv = inv_2d[mask_pts_in_valid]
-    sub_z = tgz[mask_pts_in_valid]
-    sub_abs_z = off_ground_pts[mask_pts_in_valid, 2]
+    # 【ADR 0007 & Ticket 01: SortedSliceAggregation 单趟预排序切片聚合】
+    # 建立有效网格布尔查表，单趟提取有效点并按网格编号排序，彻底消除全量数组上的 np.isin 和广播比对
+    is_valid_grid = np.zeros(len(u_code), dtype=bool)
+    is_valid_grid[valid_grid_idx] = True
+    mask_pts_in_valid = is_valid_grid[inv_2d]
+    valid_pt_indices = np.where(mask_pts_in_valid)[0]
+    
+    sub_inv = inv_2d[valid_pt_indices]
+    sub_z = tgz[valid_pt_indices]
+    sub_abs_z = off_ground_pts[valid_pt_indices, 2]
+    
+    sort_order = np.argsort(sub_inv)
+    sorted_inv = sub_inv[sort_order]
+    sorted_z = sub_z[sort_order]
+    sorted_abs_z = sub_abs_z[sort_order]
+    
+    u_valid, split_indices = np.unique(sorted_inv, return_index=True)
+    split_indices = np.append(split_indices, len(sorted_inv))
+    grid_slices = {int(g_i): (split_indices[k], split_indices[k+1]) for k, g_i in enumerate(u_valid)}
     
     grid_heights = {}
     grid_abs_max = {}
     for g_i in valid_grid_idx:
-        m = (sub_inv == g_i)
-        gz_layers = sub_z[m]
+        slice_range = grid_slices.get(int(g_i))
+        if slice_range is None:
+            continue
+        st, ed = slice_range
+        gz_layers = sorted_z[st:ed]
         if len(gz_layers) == 0:
             continue
         max_h = int(np.max(gz_layers))
@@ -130,7 +195,7 @@ def cluster_tower_voxels(off_ground_pts: np.ndarray,
         if max_h >= min_h_layer and (num_layers / (max_h + 1)) >= continuity_ratio:
             candidate_tower_indices.append(g_i)
             grid_heights[g_i] = max_h
-            grid_abs_max[g_i] = float(np.max(sub_abs_z[m]))
+            grid_abs_max[g_i] = float(np.max(sorted_abs_z[st:ed]))
             
     raw_tower_infos = []
     if len(candidate_tower_indices) > 0:
@@ -171,8 +236,8 @@ def cluster_tower_voxels(off_ground_pts: np.ndarray,
                     gcy = (gy + 0.5) * t_grid_size
                     coords.append([gcx, gcy])
                     
-                    m_pts = (sub_inv == g_i)
-                    high_pts = np.sum(m_pts & (sub_abs_z >= (cluster_abs_max_z - 6.0)))
+                    st, ed = grid_slices[int(g_i)]
+                    high_pts = int(np.sum(sorted_abs_z[st:ed] >= (cluster_abs_max_z - 6.0)))
                     weights.append(high_pts)
                     
                 weights = np.array(weights, dtype=np.float64)
@@ -296,12 +361,13 @@ def detect_towers(off_ground_pts: np.ndarray,
                     u_span_prior = span_vec / norm_span
                     u_arm_prior = np.array([-u_span_prior[1], u_span_prior[0]])
 
-        off_ground_tree = cKDTree(off_ground_pts[:, :2])
+        # 【ADR 0007 & Ticket 02: GridSpatialIndex 二维网格空间分桶索引替代全局 cKDTree】
+        spatial_index = GridSpatialIndex(off_ground_pts[:, :2], cell_size=16.0)
         for cand in tower_candidates:
             cx, cy, max_z = cand['cx'], cand['cy'], cand['max_z']
             
             r_search = min(max(max_z * 0.45, 14.0), 30.0)
-            indices = off_ground_tree.query_ball_point([cx, cy], r=r_search)
+            indices = spatial_index.query_radius([cx, cy], r=r_search)
             
             local_pts = off_ground_pts[indices]
             local_rel_z = rel_z[indices]

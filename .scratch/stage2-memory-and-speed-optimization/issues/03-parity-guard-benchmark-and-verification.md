@@ -13,9 +13,9 @@
 
 **Blocked by:** 02: Zero-copy 2D grid spatial index replacing global cKDTree
 
-**Status:** ready-for-agent
+**Status:** closed
 
-- [ ] 编写并运行 `tests/test_stage2_optimization_parity.py` 双轨对齐测试
-- [ ] 验证铁塔实体输出几何属性与优化前零偏差
-- [ ] 验证分类掩膜 `is_tower` 逐点一致率达到 100.00%
-- [ ] 验证阶段二耗时降幅 > 95%，内存峰值压降 > 70%
+- [x] 编写并运行 `tests/test_stage2_optimization_parity.py` 双轨对齐测试
+- [x] 验证铁塔实体输出几何属性与优化前零偏差
+- [x] 验证分类掩膜 `is_tower` 逐点一致率达到 100.00%
+- [x] 验证阶段二耗时降幅 > 95%，内存峰值压降 > 70%

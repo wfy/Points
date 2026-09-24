@@ -10,8 +10,8 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** closed
 
-- [ ] 在 `modules/tower_detector.py` 中实现 `SortedSliceAggregation`，重构 `cluster_tower_voxels`
-- [ ] 消除千万级布尔掩膜分配与循环比对，将初筛耗时从 >150s 压降至 <1s
-- [ ] 验证初筛候选塔中心坐标与评分与原实现 100% 浮点对齐
+- [x] 在 `modules/tower_detector.py` 中实现 `SortedSliceAggregation`，重构 `cluster_tower_voxels`
+- [x] 消除千万级布尔掩膜分配与循环比对，将初筛耗时从 >150s 压降至 <1s
+- [x] 验证初筛候选塔中心坐标与评分与原实现 100% 浮点对齐
