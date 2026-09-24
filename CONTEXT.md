@@ -80,3 +80,11 @@ _Avoid_: SplitHeight, CutPlane, TowerWaistZ
 输电线路铁塔上下空间几何比例熔断机制，刚性约束最下层横担基准高程（WaistBoundaryElevation）不得低于全塔净高的 30%，且横担半宽必须相对于塔身立柱存在阶跃突变，阻断下塔身放坡角钢误判为横担。
 _Avoid_: RatioRule, HeightCheck, SanityClamp
 
+**GridSpatialIndex**:
+二维粗网格空间分桶索引，复用 2D 网格将点云映射至局部网格桶，以纯切片索引完全替代全图级数千万点的 cKDTree，在毫秒级内完成候选塔圆形包围域的精确零拷贝过滤。
+_Avoid_: FullKDTree, GlobalPointCloudTree, SpatialHashDict
+
+**SortedSliceAggregation**:
+一维单趟预排序切片聚合算法，对非地面点按网格编号执行单趟排序并借助连续指针切片统计每个网格的垂直连续性、唯一高度层与重心加权，彻底废除在全量点云大数组上的多重布尔掩膜广播。
+_Avoid_: MaskLoop, BroadcastLookup, GridUniqueLoop
+
