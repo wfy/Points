@@ -492,9 +492,9 @@ def detect_towers(off_ground_pts: np.ndarray,
             d_v1 = np.abs(diff_all_tower @ v1)
             d_v2 = np.abs(diff_all_tower @ v2)
 
-            # 【ADR 0006 & Ticket 01: 输电网横担高程与长宽比约束】
-            # 高压输电塔最低横担通常在 50% 塔高附近，设置 min_arm_ratio = 0.50, min_arm_floor = 12.0
-            min_arm_ratio = 0.30 if getattr(t_cfg, 'allow_distribution_poles', False) else 0.50
+            # 【ADR 0006, 0008 & Ticket 01: 高耸多回路铁塔横担扫描下延先验 (TallMultiCircuitLowerBoundary)】
+            # 高压输电塔横担通常在 35%~50% 塔高附近，设置 min_arm_ratio = 0.35，并保持 min_arm_floor = 12.0m 坚固物理防树底线
+            min_arm_ratio = 0.30 if getattr(t_cfg, 'allow_distribution_poles', False) else 0.35
             min_arm_floor = 6.0 if getattr(t_cfg, 'allow_distribution_poles', False) else 12.0
             min_search_z = max(max_z * min_arm_ratio, min_arm_floor)
             max_search_z = max_z * 0.98
@@ -529,8 +529,8 @@ def detect_towers(off_ground_pts: np.ndarray,
                 allowed_thick = 5.5 if (w1 >= max(w_trunk_est + 3.0, 7.5) and w1 >= 2.0 * max(w2, 0.5)) else max_arm_thick
                 # 真实横担角钢必须显著沿横担轴向 v1 展开 (w1 明显大于躯干且相对顺线厚度具备清晰长宽比，顺线厚度受限)
                 is_beam = (w1 >= max(w_trunk_est + 1.5, min_arm_span)) and (w1 >= min_arm_aspect * max(w2, 0.5)) and (w2 <= allowed_thick) and (outer_pts_count >= 8)
-                # 耐张跳线/串判定门槛：消减断层死区，当 w1 >= 5.0, w2 >= 4.5 时亦可注册为高位跳线候选
-                is_tension_jumper = (w1 >= 5.0) and (w2 >= 4.5) and (outer_pts_count >= 40) and (w_span >= max(w_trunk_est + 3.0, 7.0)) and (z_c >= max_z * 0.60)
+                # 耐张跳线/串判定门槛：消减断层死区，当 w1 >= 5.0, w2 >= 4.5 时亦可注册为跳线候选（高度门槛放宽至 35% 塔高）
+                is_tension_jumper = (w1 >= 5.0) and (w2 >= 4.5) and (outer_pts_count >= 40) and (w_span >= max(w_trunk_est + 3.0, 7.0)) and (z_c >= max(min_search_z, max_z * 0.35))
                 
                 if is_beam or is_tension_jumper:
                     raw_candidates_z.append(z_c)
@@ -568,9 +568,11 @@ def detect_towers(off_ground_pts: np.ndarray,
             shell0 = getattr(t_cfg, 'base_anchor_shell_thick', 1.52)
             margin0 = getattr(t_cfg, 'base_anchor_margin', 0.61)
 
-            max_slope_rate = np.clip(slope0, 0.045, 0.075)
+            # 【ADR 0008 & Ticket 03: 下半部四棱台自适应物理放坡增长率 (AdaptiveFrustumSlope)】
+            # 直线塔保持 0.045~0.078 紧致放坡，耐张塔在后续 eff_slope 处自适应放宽至 0.12
+            max_slope_rate = float(np.clip(slope0, 0.045, 0.078))
             shell_thick = 1.3 * np.clip(k_height, 0.8, 1.2)
-            margin_val = min(margin0, 0.45)
+            margin_val = float(np.clip(margin0, 0.45, 0.50))
             
             # 【ADR 0005, 0006 & Ticket 01: 塔身分界高程基准 (WaistBoundaryElevation) 比例熔断】
             min_waist_floor = max(h_true * 0.30, 6.0)
@@ -709,8 +711,8 @@ def detect_towers(off_ground_pts: np.ndarray,
                 d1_high = d_v1[high_arm_zone]
                 d2_high = d_v2[high_arm_zone]
 
-                # 【Ticket 02: 铁塔横担双侧物理对称性仲裁 (Bilateral Symmetry Arbitration)】
-                # 分别度量横担左翼与右翼独立展宽，防止单侧向上隆起的边坡树木拉偏 half_arm_w
+                # 【ADR 0008 & Ticket 02: 铁塔横担双侧非对称定向盒 (AsymmetricCrossarmBox)】
+                # 分别度量横担左翼与右翼独立展宽，耐张转角塔单侧大弧垂跳线与内侧顺线耐张金具天然非对称
                 p1_signed = (tower_pts[high_arm_zone, :2] - np.array([cx, cy])) @ v1
                 p1_pos = p1_signed[p1_signed > (w_waist + 0.3)]
                 p1_neg = p1_signed[p1_signed < -(w_waist + 0.3)]
@@ -718,19 +720,27 @@ def detect_towers(off_ground_pts: np.ndarray,
                 w_r = float(np.percentile(p1_pos, 98.5)) if len(p1_pos) >= 15 else 0.0
                 w_l = float(np.percentile(-p1_neg, 98.5)) if len(p1_neg) >= 15 else 0.0
                 
-                if w_r > 0.0 and w_l > 0.0:
-                    w_min = min(w_r, w_l)
-                    w_max = max(w_r, w_l)
-                    # 真实铁塔横担两侧具备刚性双侧对称设计先验。若单侧展宽显著超出对侧（例如单侧边坡树木拉偏），以洁净侧翼展约束
-                    if w_max > (w_min * 1.25 + 0.5):
-                        w_sym_cap = w_min * 1.05 + 0.3
-                    else:
-                        w_sym_cap = w_max
-                    half_arm_raw = w_sym_cap + 0.35
+                if is_tension_tower:
+                    # 耐张转角塔具备单侧大弧垂跳线与内侧顺线耐张金具的天然物理非对称性，豁免强制双侧对称截断
+                    half_arm_pos = min(max(w_r + 0.35 if w_r > 0.0 else 4.5, 4.5), half_arm_max * 1.10)
+                    half_arm_neg = min(max(w_l + 0.35 if w_l > 0.0 else 4.5, 4.5), half_arm_max * 1.10)
+                    half_arm_w = max(half_arm_pos, half_arm_neg)
                 else:
-                    half_arm_raw = np.percentile(d1_high, 99.0) + 0.35
+                    # 直线悬垂塔保持双侧对称先验，防止单侧向上隆起的边坡孤立树木拉偏包围盒
+                    if w_r > 0.0 and w_l > 0.0:
+                        w_min = min(w_r, w_l)
+                        w_max = max(w_r, w_l)
+                        if w_max > (w_min * 1.25 + 0.5):
+                            w_sym_cap = w_min * 1.05 + 0.3
+                        else:
+                            w_sym_cap = w_max
+                        half_arm_raw = w_sym_cap + 0.35
+                    else:
+                        half_arm_raw = np.percentile(d1_high, 99.0) + 0.35
 
-                half_arm_w = min(max(half_arm_raw, 4.5), half_arm_max * 1.10)
+                    half_arm_w = min(max(half_arm_raw, 4.5), half_arm_max * 1.10)
+                    half_arm_pos = half_arm_w
+                    half_arm_neg = half_arm_w
                 
                 # 【Ticket 02: 动态识别耐张塔与直线塔，放开耐张塔跳线/耐张串厚度】
                 p95_v2 = float(np.percentile(d2_high, 95.0))
@@ -749,9 +759,12 @@ def detect_towers(off_ground_pts: np.ndarray,
                     half_line_t = min(max(p98_v2 + 0.35, 2.5), min(max(half_line_limit, 3.2), max_ceiling))
             else:
                 half_arm_w = half_arm_max * 1.05
+                half_arm_pos = half_arm_w
+                half_arm_neg = half_arm_w
                 half_line_t = 3.2
 
-            mask_high_box = high_arm_zone & (d_v1 <= half_arm_w) & (d_v2 <= half_line_t)
+            p1_all = diff_all_tower @ v1
+            mask_high_box = high_arm_zone & (p1_all >= -half_arm_neg) & (p1_all <= half_arm_pos) & (d_v2 <= half_line_t)
             
             # 【Ticket 02: 上半部定向盒 3D 体素空间连通性过滤 (UpperTowerBox 3D CC)】
             # 针对直线塔以塔身立柱为种子向外 BFS 连通，过滤掉落在包围盒边缘但与铁塔空间断开的边坡悬空孤立树斑
@@ -801,13 +814,15 @@ def detect_towers(off_ground_pts: np.ndarray,
                 is_top_bracket_zone = is_top_bracket_zone | (tower_pts[:, 2] >= (abs_max_z - 5.5))
             top_bracket_mask = is_top_bracket_zone & (d_v1 <= top_arm_w) & (d_v2 <= half_line_t)
 
-            # 【ADR 0005 & Ticket 03: 下半部四棱台放坡包围盒 (LowerTowerFrustum)】
-            # 从 abs_z_boundary (WaistBoundaryElevation) 向下以真实物理放坡斜率线性延伸至塔基地面
+            # 【ADR 0005, 0008 & Ticket 03: 下半部四棱台放坡包围盒 (LowerTowerFrustum)】
+            # 耐张重型塔放坡率自适应放宽至 0.12、裕量放宽至 0.65m，直线塔保持紧致放坡 (<=0.078, 裕量 0.50m)
+            eff_slope = 0.12 if is_tension_tower else max_slope_rate
+            eff_margin = 0.65 if is_tension_tower else margin_val
             delta_z_all = np.maximum(abs_z_boundary - tower_pts[:, 2], 0.0)
-            w1_allowed = w1_trunk + delta_z_all * max_slope_rate + margin_val
-            w2_allowed = w2_trunk + delta_z_all * max_slope_rate + margin_val
+            w1_allowed = w1_trunk + delta_z_all * eff_slope + eff_margin
+            w2_allowed = w2_trunk + delta_z_all * eff_slope + eff_margin
             
-            low_tower_cand = (tower_pts[:, 2] < abs_z_boundary) & (tower_pts[:, 2] >= (z_ground_datum - 3.0)) & (d_v1 <= w1_allowed) & (d_v2 <= w2_allowed)
+            low_tower_cand = (tower_pts[:, 2] < abs_z_boundary) & (tower_pts[:, 2] >= (z_ground_datum - 8.0)) & (d_v1 <= w1_allowed) & (d_v2 <= w2_allowed)
 
             # 以腰部纯净立柱点为种子向下连通，步长 0.85m 贯穿钢构角钢，阻断方盒边缘不连通的山坡独立植被与悬空杂块
             seed_mask = high_arm_zone & (tower_pts[:, 2] <= (z_ground_datum + z_lowest_arm + 3.0)) & (d_v1 <= (w_waist + 0.8)) & (d_v2 <= (w_waist + 0.8))

@@ -88,3 +88,16 @@ _Avoid_: FullKDTree, GlobalPointCloudTree, SpatialHashDict
 一维单趟预排序切片聚合算法，对非地面点按网格编号执行单趟排序并借助连续指针切片统计每个网格的垂直连续性、唯一高度层与重心加权，彻底废除在全量点云大数组上的多重布尔掩膜广播。
 _Avoid_: MaskLoop, BroadcastLookup, GridUniqueLoop
 
+**AsymmetricCrossarmBox**:
+覆盖耐张转角塔等非对称金具的横担双侧独立定向矩形包围盒，对横担轴向正负两翼分别度量实际外展并施加独立半宽，彻底废除宽侧必须被窄侧硬剪的刚性对称假设，允许单侧大弧垂跳线与金具完整保留。
+_Avoid_: SymmetricArmBox, RigidArmOBB, ForcedSymmetricBox
+
+**TallMultiCircuitLowerBoundary**:
+高耸多回路输电铁塔横担扫描下延先验，在总高大（>=45m）且沿塔身纵向排布多层横担的重型铁塔上，将横担切片初筛起始门槛放宽至 35% 塔高（结合 12m 绝对防树底线），确保最底层横担被完整检出，防止蓝黄分割线腰斩倒挂。
+_Avoid_: FixedHalfHeightFilter, HighTowerRatioCut
+
+**AdaptiveFrustumSlope**:
+下半部四棱台自适应物理放坡增长率，将塔身向下的放坡斜率上限放宽至 0.15 m/m，配合塔脚 1.2m 空间体素连通生长与陡坡基准高程解耦，完整捕获大开度耐张塔腿与山地长短腿塔靴。
+_Avoid_: FixedSlopeCap, StiffConeRate
+
+

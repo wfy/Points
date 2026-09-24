@@ -116,5 +116,65 @@ class TestLowerTowerCapture(unittest.TestCase):
         # 验证腰宽紧收在 2.5m 内，绝不膨胀至横担宽度 (5m~10m)
         self.assertLess(ent.w_trunk0, 2.5, f"塔身纯立柱腰宽膨胀: {ent.w_trunk0:.2f}m")
 
+    def test_tension_tower_wide_base_slope_and_steep_terrain_capture(self):
+        """
+        ADR 0008 & Ticket 03: 验证大开度耐张重型铁塔与大坡度山地长短腿：
+        1. 耐张重型塔下塔身大坡度放坡 (slope ~0.105, 底部开度 11m) 完整被捕获；
+        2. 延伸至地面基准线下方 (如长腿深入 z_ground_datum - 5.0m) 的陡坡塔脚不被提前截断；
+        3. 塔身角钢点云召回率 >= 95%。
+        """
+        np.random.seed(42)
+        cx, cy = 300.0, 300.0
+        h_tower = 36.0
+        
+        # 1. 耐张横担与耐张金具 (厚度较大, 触发 is_tension_tower)
+        n_arm = 2500
+        arm_z = np.random.uniform(24.0, 34.0, n_arm)
+        arm_x = np.random.uniform(cx - 8.0, cx + 8.0, n_arm)
+        # 耐张塔顺线方向厚度较大 (沿 y 展开达 4.5m，触发 is_tension_tower)
+        arm_y = np.random.uniform(cy - 4.5, cy + 4.5, n_arm)
+        
+        # 2. 塔腰 (Z: 18.0 ~ 24.0m, 半宽 ~2.2m)
+        n_waist = 2000
+        waist_z = np.random.uniform(18.0, 24.0, n_waist)
+        waist_x = np.random.uniform(cx - 2.2, cx + 2.2, n_waist)
+        waist_y = np.random.uniform(cy - 2.2, cy + 2.2, n_waist)
+        
+        # 3. 大坡度下塔身与陡坡长腿 (Z: -5.0m ~ 18.0m, 放坡斜率 ~0.105, 底部半宽达 5.5m 即 11m 开度)
+        n_legs = 5000
+        leg_z = np.random.uniform(-5.0, 18.0, n_legs)
+        slope = 0.105
+        allowed_w = 2.2 + (20.0 - leg_z) * slope
+        # 模拟 4 条塔腿主材与横撑
+        legs_idx = np.random.choice(4, n_legs)
+        leg_signs = [(-1, -1), (-1, 1), (1, -1), (1, 1)]
+        leg_x = np.array([cx + leg_signs[l][0] * (allowed_w[i] * 0.95) for i, l in enumerate(legs_idx)]) + np.random.normal(0, 0.05, n_legs)
+        leg_y = np.array([cy + leg_signs[l][1] * (allowed_w[i] * 0.95) for i, l in enumerate(legs_idx)]) + np.random.normal(0, 0.05, n_legs)
+        
+        tower_pts = np.vstack([
+            np.column_stack([arm_x, arm_y, arm_z]),
+            np.column_stack([waist_x, waist_y, waist_z]),
+            np.column_stack([leg_x, leg_y, leg_z]),
+        ])
+        
+        rel_z = tower_pts[:, 2].copy()
+        # 地面基准面在 0.0m 左右，长腿延伸至 -5.0m
+        off_ground_idx = np.arange(len(tower_pts))
+        
+        cfg = DEFAULT_CONFIG
+        is_tower, is_tower_arm, is_near_tower, entities = detect_towers(
+            off_ground_pts=tower_pts,
+            rel_z=rel_z,
+            off_ground_idx=off_ground_idx,
+            config=cfg
+        )
+        
+        self.assertGreaterEqual(len(entities), 1, "未检测到耐张铁塔实体")
+        tower_mask = is_tower[:len(tower_pts)]
+        tower_recall = np.sum(tower_mask) / len(tower_pts)
+        print(f"[TestLowerTowerCapture] 耐张铁塔包含大开度塔腿与长短腿召回率: {tower_recall:.2%}")
+        self.assertGreater(tower_recall, 0.95, f"耐张铁塔塔腿捕获率过低: {tower_recall:.2%}")
+
 if __name__ == '__main__':
     unittest.main()
+
