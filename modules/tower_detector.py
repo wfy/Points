@@ -389,6 +389,19 @@ def detect_towers(off_ground_pts: np.ndarray,
             diff_all_tower = tower_pts[:, :2] - np.array([cx, cy])
             dist_all_tower = np.hypot(diff_all_tower[:, 0], diff_all_tower[:, 1])
 
+            # 【ADR 0006, Ticket 01 & 02: 跨档走向参考向量 v_span】
+            # 从 candidate clusters 中查找相距 >= 45m 的相邻高塔（代表真实跨档走廊走向）
+            other_cands = [c for c in tower_candidates if np.hypot(c['cx'] - cx, c['cy'] - cy) >= 45.0]
+            if len(other_cands) > 0:
+                dists_other = [np.hypot(c['cx'] - cx, c['cy'] - cy) for c in other_cands]
+                nearest_cand = other_cands[int(np.argmin(dists_other))]
+                v_span = np.array([nearest_cand['cx'] - cx, nearest_cand['cy'] - cy])
+                v_span /= np.linalg.norm(v_span)
+            elif u_span_prior is not None:
+                v_span = u_span_prior
+            else:
+                v_span = None
+
             # 拟合高位金属横担直线特征 (RANSAC)
             half_arm_max = min(max(max_z * 0.32, 6.0), 16.5)
             steel_z_min, steel_z_max = max_z * 0.70, max_z * 0.98
@@ -404,16 +417,31 @@ def detect_towers(off_ground_pts: np.ndarray,
             if v_arm is not None and inlier_count >= 8:
                 v_a = v_arm
                 v_b = np.array([-v_a[1], v_a[0]])
-                d_a = np.abs((lattice_arm_pts[:, :2] - np.array([cx, cy])) @ v_a)
-                d_b = np.abs((lattice_arm_pts[:, :2] - np.array([cx, cy])) @ v_b)
-                if np.percentile(d_b, 98) > np.percentile(d_a, 98):
-                    v1, v2 = v_b, v_a
+                if v_span is not None:
+                    # 走廊正交门禁：真实高压横担必须与跨档走廊垂直 (|v_arm · v_span| <= 0.40)
+                    # 若 RANSAC 拟合到的是架空导线，其与 v_span 平行 (|v_a · v_span| > 0.60)，
+                    # 则垂直于走廊的法向 v_b 才是真实横担轴向
+                    dot_span_a = abs(float(v_a @ v_span))
+                    dot_span_b = abs(float(v_b @ v_span))
+                    if dot_span_a <= dot_span_b:
+                        v1, v2 = v_a, v_b
+                    else:
+                        v1, v2 = v_b, v_a
                 else:
-                    v1, v2 = v_a, v_b
+                    d_a = np.abs((lattice_arm_pts[:, :2] - np.array([cx, cy])) @ v_a)
+                    d_b = np.abs((lattice_arm_pts[:, :2] - np.array([cx, cy])) @ v_b)
+                    if np.percentile(d_b, 98) > np.percentile(d_a, 98):
+                        v1, v2 = v_b, v_a
+                    else:
+                        v1, v2 = v_a, v_b
             else:
                 high_arm_zone_temp = tower_z >= (max_z * 0.40)
                 arm_pts_temp = tower_pts[high_arm_zone_temp]
-                if len(arm_pts_temp) >= 10:
+                if v_span is not None:
+                    # 若无 RANSAC 结果，优先采用与跨档走廊垂直的方向作为初始横担轴 v1
+                    v1 = np.array([-v_span[1], v_span[0]])
+                    v2 = v_span
+                elif len(arm_pts_temp) >= 10:
                     cov_arm = np.cov(arm_pts_temp[:, :2].T)
                     evals_a, evecs_a = np.linalg.eigh(cov_arm)
                     v1 = evecs_a[:, 1]
@@ -439,10 +467,14 @@ def detect_towers(off_ground_pts: np.ndarray,
             w_trunk_est = float(np.percentile(d_v1[waist_est_m], 90)) if np.sum(waist_est_m) >= 10 else min(max(0.045 * max_z, 1.8), 3.5)
 
             min_arm_aspect = 1.3 if getattr(t_cfg, 'allow_distribution_poles', False) else 2.3
-            min_arm_span = 2.5 if getattr(t_cfg, 'allow_distribution_poles', False) else max(max_z * 0.12, 5.0)
+            min_arm_span = 2.5 if getattr(t_cfg, 'allow_distribution_poles', False) else max(max_z * 0.10, 4.0)
 
+            beam_slices = []
+            jumper_slices = []
+
+            r_arm_eval = min(half_arm_max * 1.15, 15.0)
             for z_c in slice_centers:
-                slice_mask = (tower_z >= z_c - z_slice_step * 0.6) & (tower_z <= z_c + z_slice_step * 0.6)
+                slice_mask = (tower_z >= z_c - z_slice_step * 0.6) & (tower_z <= z_c + z_slice_step * 0.6) & (dist_all_tower <= r_arm_eval)
                 if np.sum(slice_mask) < 6:
                     continue
                 
@@ -453,15 +485,32 @@ def detect_towers(off_ground_pts: np.ndarray,
                 w2 = float(np.percentile(d_v2_slice, 95))
                 w_span = max(w1, w2)
                 w_thick = min(w1, w2)
-                outer_pts_count = np.sum((d_v1_slice >= 4.5) | (d_v2_slice >= 4.5))
+                outer_pts_count = np.sum((d_v1_slice >= 4.0) | (d_v2_slice >= 4.0))
 
                 # 真实横担角钢必须显著沿横担轴向 v1 展开 (w1 明显大于躯干且相对顺线厚度具备清晰长宽比)
-                is_beam = (w1 >= max(w_trunk_est + 2.0, min_arm_span)) and (w1 >= min_arm_aspect * max(w2, 0.5)) and (outer_pts_count >= 10)
+                max_allowed_w1 = min(half_arm_max * 1.15, 18.0)
+                max_allowed_w2 = max(0.08 * max_z, 3.8)
+                is_beam = (w1 >= max(w_trunk_est + 2.0, min_arm_span)) and (w1 <= max_allowed_w1) and (w2 <= max_allowed_w2) and (w1 >= min_arm_aspect * max(w2, 0.5)) and (outer_pts_count >= 10)
                 # 耐张跳线仅存在于高位横担下方附近区间 (>= 0.65 * max_z)，绝不可能悬垂在接近地面的低空树冠处
                 is_tension_jumper = (w1 >= 5.5) and (w2 >= 5.5) and (outer_pts_count >= 50) and (w_span >= max(w_trunk_est + 3.0, 7.0)) and (z_c >= max_z * 0.65)
                 
-                if is_beam or is_tension_jumper:
-                    raw_candidates_z.append(z_c)
+                if is_beam:
+                    beam_slices.append(z_c)
+                elif is_tension_jumper:
+                    jumper_slices.append(z_c)
+
+            # 【Ticket 02 准入条件：真实高压铁塔严禁“仅有跳线而无横担横梁”】
+            # 耐张跳线必须依附于横担梁附近区间，禁止孤立圆形树冠仅凭各向同性厚度直接注册为横担候选
+            if len(beam_slices) >= 1:
+                beam_min_z = min(beam_slices)
+                beam_max_z = max(beam_slices)
+                valid_jumpers = [
+                    jz for jz in jumper_slices 
+                    if (beam_min_z - 4.5) <= jz <= (beam_max_z + 1.2)
+                ]
+                raw_candidates_z = sorted(beam_slices + valid_jumpers)
+            else:
+                raw_candidates_z = []
 
             max_allowed_gap = min(max(0.10 * max_z, 3.5), 4.5)
             if len(raw_candidates_z) > 0:
@@ -497,10 +546,15 @@ def detect_towers(off_ground_pts: np.ndarray,
             shell_thick = 1.3 * np.clip(k_height, 0.8, 1.2)
             margin_val = min(margin0, 0.45)
             
-            # 【ADR 0005, 0006 & Ticket 01: 塔身分界高程基准 (WaistBoundaryElevation) 比例熔断】
+            # 【ADR 0005, 0006 & Ticket 01, 02: 塔身分界高程基准与无横担兜底收紧】
             min_waist_floor = max(h_true * 0.30, 6.0)
             if len(crossarm_candidate_z) == 0:
                 if not is_robust_lattice or h_true < 22.0:
+                    continue
+                # 【Ticket 02 & 03: 无横担兜底校验】真实高压铁塔若无横担，仅能为细长立柱（半径 <= 3.8m）
+                # 严禁在树冠高位区间 (z >= 0.50 * max_z) 存在宽大膨胀球冠 (半径 > 6.0m)
+                mid_canopy_pts = np.sum((dist_all_tower > 6.0) & (tower_z >= max_z * 0.50))
+                if mid_canopy_pts >= 500:
                     continue
                 arm_ratio = float(np.clip(0.55 - 0.03 * (k_height - 1.0), 0.45, 0.60))
                 waist_boundary_z = max(h_true * arm_ratio, min_waist_floor)
@@ -598,6 +652,18 @@ def detect_towers(off_ground_pts: np.ndarray,
             diff_all_tower = tower_pts[:, :2] - np.array([cx, cy])
             d_v1 = np.abs(diff_all_tower @ v1)
             d_v2 = np.abs(diff_all_tower @ v2)
+
+            # 【Ticket 03: 塔身腰部收窄与树冠扩散比过滤 (Waist Necking & Canopy Spread Filter)】
+            # 严格在最下横担下方 [z_lowest_arm - 3.0, z_lowest_arm - 0.4] 纯净立柱区间采样
+            # 真实铁塔在腰身区间仅包含四根主立柱 (r <= 3.8m)，外部空间 (3.8m < r <= 15m) 空旷无点；
+            # 档中山坡大树林呈各向同性实心球冠向外大幅膨胀，外缘扩散点数远超阈值，坚决予以剔除
+            waist_eval_m = (tower_z >= max(z_lowest_arm - 3.0, 0.0)) & (tower_z <= max(z_lowest_arm - 0.4, 0.0))
+            if np.sum(waist_eval_m) >= 20:
+                dist_waist_eval = np.hypot(diff_all_tower[waist_eval_m, 0], diff_all_tower[waist_eval_m, 1])
+                inner_waist = np.sum(dist_waist_eval <= 3.8)
+                outer_waist = np.sum((dist_waist_eval > 3.8) & (dist_waist_eval <= 15.0))
+                if outer_waist >= 500 and outer_waist > 0.60 * inner_waist:
+                    continue
 
             # 【阶段二优化 2：精准测量塔身纯立柱半宽 (W_trunk)】
             # 严格在最下横担下方 [z_lowest_arm - 2.2, z_lowest_arm - 0.4] 纯立柱区间测量，近轴限制 d <= 3.8m
