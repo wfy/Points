@@ -46,6 +46,8 @@ class TowerEntity:
     half_l2: float = 2.5                                                  # 塔侧厚度半宽
     d_diag: float = 16.0                                                  # 塔顶横担对角线跨度
     z_lowest_arm: float = 10.0                                            # 最低横担挂点相对高度
+    abs_z_boundary: float = 0.0                                           # 绝对物理水平分界标高
+    abs_base_ground_z: float = 0.0                                        # 塔基绝对物理标高
     w_trunk0: float = 1.8                                                 # 塔身初始半宽
     confidence: float = 1.0                                               # 杆塔骨架几何置信度 [0.0, 1.0]
     pts_idx: np.ndarray = field(default_factory=lambda: np.array([], dtype=int)) # 铁塔在非地面点中的局部索引
@@ -73,6 +75,8 @@ class TowerEntity:
             'half_l2': self.half_l2,
             'd_diag': self.d_diag,
             'z_lowest_arm': self.z_lowest_arm,
+            'abs_z_boundary': self.abs_z_boundary,
+            'abs_base_ground_z': self.abs_base_ground_z,
             'w_trunk0': self.w_trunk0,
             'confidence': self.confidence,
             'pts_idx': self.pts_idx

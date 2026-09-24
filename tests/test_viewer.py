@@ -40,7 +40,7 @@ class TestViewerModule(unittest.TestCase):
                 self.assertEqual(found, fake_path)
 
     def test_finder_missing(self):
-        with patch.dict(os.environ, {"QTMODELER_PATH": ""}):
+        with patch.dict(os.environ, {}, clear=True):
             with patch("os.path.exists", return_value=False):
                 found = find_qtmodeler()
                 self.assertIsNone(found)

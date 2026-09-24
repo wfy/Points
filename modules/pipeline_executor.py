@@ -141,8 +141,12 @@ class PipelineExecutor:
                 _local = _info.get('pts_idx', np.array([], dtype=int))
                 if len(_local) == 0:
                     continue
-                _z_low = float(_info.get('z_lowest_arm', 10.0))
-                _below = _local[rel_z[_local] < _z_low]
+                _abs_bound = float(_info.get('abs_z_boundary', 0.0))
+                if _abs_bound > 0.0:
+                    _below = _local[points[off_ground_idx[_local], 2] < _abs_bound]
+                else:
+                    _z_low = float(_info.get('z_lowest_arm', 10.0))
+                    _below = _local[rel_z[_local] < _z_low]
                 if len(_below) > 0:
                     _parts.append(off_ground_idx[_below])
             if _parts:
